@@ -76,21 +76,22 @@ def find_best_geo_split(
                     model.fit(X_scaled, y)
 
                     coefs = model.coef_
-                    dynamic_threshold = max(coef_threshold, np.max(np.abs(coefs)) * 0.05)
-
+                    # Filter controls with non-negative coefficients (aligns better with synthetic control)
                     selected_controls = [
                         control_pool[i]
                         for i in range(len(control_pool))
-                        if abs(coefs[i]) > dynamic_threshold
+                        if coefs[i] > 0
                     ]
 
                     if len(selected_controls) == 0:
+                        # Fallback to absolute value if everything is zero/negative
                         idx_max = np.argmax(np.abs(coefs))
                         selected_controls = [control_pool[idx_max]]
 
                     X_selected = df_transformed[selected_controls].values
                     X_selected_scaled, _ = scale_data(X_selected)
 
+                    # Re-fit only on selected controls to get the final score
                     model.fit(X_selected_scaled, y)
                     y_pred = model.predict(X_selected_scaled)
                     residual = y - y_pred
@@ -127,7 +128,8 @@ def find_best_geo_split(
     if len(results) == 0:
         raise ValueError("No valid combinations found.")
 
-    best = sorted(results, key=lambda x: x["std_residual"])[0]
+    # Prioritize combination with BEST correlation * (1 - std_residual)
+    best = sorted(results, key=lambda x: x["std_residual"] / (x["correlation"] + 1e-6))[0]
     
     if verbose:
         print("\n=== BEST COMBINATION ===")
@@ -135,19 +137,14 @@ def find_best_geo_split(
 
     return best
 
-def build_geo_clusters(splits, refine=True):
+def build_geo_clusters(splits):
     """
     Expande tratamentos em clusters individuais.
-    Se refine=True, re-seleciona os melhores controles para cada tratamento individualmente
-    dentro do pool de controles do split.
 
     Entrada:
     {
         "treatment": [...],
-        "control": [...],
-        "df_transformed": pd.DataFrame,
-        "alpha": float,
-        "l1_ratio": float
+        "control": [...]
     }
 
     Saída:
@@ -157,53 +154,11 @@ def build_geo_clusters(splits, refine=True):
 
     treatments = splits["treatment"]
     controls = splits["control"]
-    
-    # Se não houver dados transformados ou refine for Falso, volta ao comportamento anterior
-    if not refine or "df_transformed" not in splits:
-        for t in treatments:
-            clusters.append({
-                "treatment": [t],
-                "control": controls
-            })
-        return clusters
-
-    df_transformed = splits["df_transformed"]
-    alpha = splits.get("alpha", DEFAULT_ALPHA)
-    l1_ratio = splits.get("l1_ratio", DEFAULT_L1_RATIO)
 
     for t in treatments:
-        try:
-            y = df_transformed[t].values
-            X = df_transformed[controls].values
-            X_scaled, _ = scale_data(X)
+        clusters.append({
+            "treatment": [t],
+            "control": controls
+        })
 
-            model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=10000)
-            model.fit(X_scaled, y)
-
-            coefs = model.coef_
-            # Usando um threshold simples para manter os controles mais relevantes para este tratamento em particular
-            dynamic_threshold = np.max(np.abs(coefs)) * 0.1
-            
-            selected_controls = [
-                controls[i]
-                for i in range(len(controls))
-                if abs(coefs[i]) >= dynamic_threshold
-            ]
-
-            # Garante pelo menos um controle caso todos sejam zerados pelo threshold
-            if len(selected_controls) == 0:
-                idx_max = np.argmax(np.abs(coefs))
-                selected_controls = [controls[idx_max]]
-
-            clusters.append({
-                "treatment": [t],
-                "control": selected_controls
-            })
-        except Exception:
-            # Fallback em caso de erro na re-seleção
-            clusters.append({
-                "treatment": [t],
-                "control": controls
-            })
-
-    return clusters
+    return clusters
