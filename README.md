@@ -19,13 +19,17 @@ RealLift is a powerful Python library designed to help data scientists and marke
 
 ## 🚀 Installation
 
-Install it directly from source:
+Install it via PyPI:
+
+```bash
+pip install reallift
+```
+
+Or install it directly from source:
 
 ```bash
 pip install .
 ```
-
-*Coming soon to PyPI: `pip install reallift`*
 
 ---
 
