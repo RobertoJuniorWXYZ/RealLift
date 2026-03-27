@@ -128,21 +128,26 @@ def find_best_geo_split(
         raise ValueError("No valid combinations found.")
 
     best = sorted(results, key=lambda x: x["std_residual"])[0]
-
+    
     if verbose:
         print("\n=== BEST COMBINATION ===")
-        print(best)
+        print({k: v for k, v in best.items() if k != "df_transformed"})
 
     return best
 
-def build_geo_clusters(splits):
+def build_geo_clusters(splits, refine=True):
     """
     Expande tratamentos em clusters individuais.
+    Se refine=True, re-seleciona os melhores controles para cada tratamento individualmente
+    dentro do pool de controles do split.
 
     Entrada:
     {
         "treatment": [...],
-        "control": [...]
+        "control": [...],
+        "df_transformed": pd.DataFrame,
+        "alpha": float,
+        "l1_ratio": float
     }
 
     Saída:
@@ -152,11 +157,53 @@ def build_geo_clusters(splits):
 
     treatments = splits["treatment"]
     controls = splits["control"]
+    
+    # Se não houver dados transformados ou refine for Falso, volta ao comportamento anterior
+    if not refine or "df_transformed" not in splits:
+        for t in treatments:
+            clusters.append({
+                "treatment": [t],
+                "control": controls
+            })
+        return clusters
+
+    df_transformed = splits["df_transformed"]
+    alpha = splits.get("alpha", DEFAULT_ALPHA)
+    l1_ratio = splits.get("l1_ratio", DEFAULT_L1_RATIO)
 
     for t in treatments:
-        clusters.append({
-            "treatment": [t],
-            "control": controls
-        })
+        try:
+            y = df_transformed[t].values
+            X = df_transformed[controls].values
+            X_scaled, _ = scale_data(X)
+
+            model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=10000)
+            model.fit(X_scaled, y)
+
+            coefs = model.coef_
+            # Usando um threshold simples para manter os controles mais relevantes para este tratamento em particular
+            dynamic_threshold = np.max(np.abs(coefs)) * 0.1
+            
+            selected_controls = [
+                controls[i]
+                for i in range(len(controls))
+                if abs(coefs[i]) >= dynamic_threshold
+            ]
+
+            # Garante pelo menos um controle caso todos sejam zerados pelo threshold
+            if len(selected_controls) == 0:
+                idx_max = np.argmax(np.abs(coefs))
+                selected_controls = [controls[idx_max]]
+
+            clusters.append({
+                "treatment": [t],
+                "control": selected_controls
+            })
+        except Exception:
+            # Fallback em caso de erro na re-seleção
+            clusters.append({
+                "treatment": [t],
+                "control": controls
+            })
 
     return clusters
