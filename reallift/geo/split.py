@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from reallift.utils.preprocessing import log_diff_transform, scale_data
 from reallift.config.defaults import DEFAULT_ALPHA, DEFAULT_L1_RATIO, DEFAULT_COEF_THRESHOLD
 
-def find_best_geo_split(
+def find_best_geo_clusters(
     filepath,
     date_col,
     geos=None,
@@ -18,7 +18,7 @@ def find_best_geo_split(
     verbose=True
 ) -> dict:
     """
-    Find the best geo split for treatment and control groups.
+    Find the best geo split and build clusters for treatment and control groups.
 
     Parameters:
         filepath (str): Path to CSV file.
@@ -32,7 +32,7 @@ def find_best_geo_split(
         verbose (bool): Whether to print results.
 
     Returns:
-        dict: Best split result.
+        dict: Best split result including individual clusters.
     """
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
@@ -51,14 +51,20 @@ def find_best_geo_split(
     alpha_grid = [0.001, 0.01, 0.1]
     l1_grid = [0.2, 0.5, 0.8]
 
+    # Global set of geos that are part of ANY treatment to exclude from ALL control pools
+    all_treatment_geos = set(fixed_treatment) if fixed_treatment is not None else set()
+
     if fixed_treatment is not None:
-        treatment_combinations = [fixed_treatment]
+        # If we have multiple fixed geos, we evaluate each one individually 
+        # to find its own best controls, avoiding identical metrics.
+        treatment_combinations = [[t] for t in fixed_treatment]
     else:
         treatment_combinations = combinations(geos, n_treatment)
 
     for treatment_comb in treatment_combinations:
-        treatment_comb = list(treatment_comb)
-        control_pool = [g for g in geos if g not in treatment_comb]
+        # Exclude ALL treatment geos from the control pool, not just the current combination
+        forbidden_geos = set(treatment_comb).union(all_treatment_geos)
+        control_pool = [g for g in geos if g not in forbidden_geos]
 
         try:
             df_transformed = log_diff_transform(df, treatment_comb + control_pool)
@@ -128,37 +134,28 @@ def find_best_geo_split(
     if len(results) == 0:
         raise ValueError("No valid combinations found.")
 
-    # Prioritize combination with BEST correlation * (1 - std_residual)
-    best = sorted(results, key=lambda x: x["std_residual"] / (x["correlation"] + 1e-6))[0]
+    # Sort results to find the best overall
+    results = sorted(results, key=lambda x: x["std_residual"] / (x["correlation"] + 1e-6))
     
-    if verbose:
-        print("\n=== BEST COMBINATION ===")
-        print({k: v for k, v in best.items() if k != "df_transformed"})
-
-    return best
-
-def build_geo_clusters(splits):
-    """
-    Expande tratamentos em clusters individuais.
-
-    Entrada:
-    {
-        "treatment": [...],
-        "control": [...]
-    }
-
-    Saída:
-    lista de clusters independentes
-    """
+    # NEW: Return all evaluated combinations as clusters
+    # This ensures that each fixed treatment gets its own cluster with unique metrics.
     clusters = []
-
-    treatments = splits["treatment"]
-    controls = splits["control"]
-
-    for t in treatments:
+    for i, res in enumerate(results):
         clusters.append({
-            "treatment": [t],
-            "control": controls
+            "treatment": res["treatment"], # Keep full treatment list
+            "control": res["control"],
+            "correlation": res["correlation"],
+            "std_residual": res["std_residual"],
+            "n_controls": res["n_controls"],
+            "alpha": res["alpha"],
+            "l1_ratio": res["l1_ratio"]
         })
 
-    return clusters
+    if verbose:
+        print("\n=== BEST CLUSTERS FOUND ===")
+        # Limit to top 5 if not using fixed_treatment to avoid spam
+        display_clusters = clusters if fixed_treatment else clusters[:5]
+        for i, c in enumerate(display_clusters):
+            print(f"Cluster {i}: Treatment {c['treatment']}, Correlation {c['correlation']:.4f}")
+
+    return clusters if fixed_treatment else clusters[:5]

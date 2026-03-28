@@ -12,6 +12,7 @@ def run_synthetic_control(
     control_geos,
     treatment_start_date,
     random_state=None,
+    cluster_idx=None,
     plot=True,
     verbose=True
 ) -> dict:
@@ -25,6 +26,7 @@ def run_synthetic_control(
         control_geos (list): Control geographies.
         treatment_start_date (str): Treatment start date.
         random_state (int or np.random.Generator): Random state for reproducibility.
+        cluster_idx (int or str): Optional cluster index for logging.
         plot (bool): Whether to plot.
         verbose (bool): Whether to print results.
 
@@ -38,7 +40,11 @@ def run_synthetic_control(
 
     treatment_idx = df[df[date_col] >= pd.to_datetime(treatment_start_date)].index[0]
 
-    y = df[treatment_geo].values.astype(float)
+    if isinstance(treatment_geo, list):
+        y = df[treatment_geo].mean(axis=1).values.astype(float)
+    else:
+        y = df[treatment_geo].values.astype(float)
+
     X = df[control_geos].values.astype(float)
 
     y_mean = y[:treatment_idx].mean()
@@ -87,26 +93,38 @@ def run_synthetic_control(
     boot_result = bootstrap_significance(effect, post_synth, random_state=random_state)
 
     if verbose:
-        print("\n=== SYNTHETIC CONTROL RESULT ===")
+        header = "=== GEO SYNTHETIC CONTROL ==="
+        if cluster_idx is not None:
+            header = f"=== GEO SYNTHETIC CONTROL (Cluster {cluster_idx}) ==="
+        print(f"\n{header}")
         print("\nWeights:")
         for geo, w_val in zip(control_geos, weights):
             print(f"{geo}: {w_val:.4f}")
-        print(f"\nIntercept: {alpha_val:.4f}")
+
         print("\nTreatment period:")
-        print(f"Start: {df[date_col].iloc[treatment_idx]}")
+        start_date = df[date_col].iloc[treatment_idx].strftime('%Y-%m-%d')
+        end_date = df[date_col].iloc[-1].strftime('%Y-%m-%d')
+        print(f"Start: {start_date}")
+        print(f"End: {end_date}")
         print(f"Duration: {len(effect)} days")
-        print(f"\nPre-treatment mean error: {pre_error:.2f}")
+
         print(f"\nMean lift (abs): {lift_abs:.2f}")
         print(f"Mean lift (%): {lift_pct * 100:.2f} %")
         print(f"Total lift: {lift_total:.2f}")
 
-        print("\n=== SIGNIFICANCE ===")
+        sig_header = "=== SIGNIFICANCE ==="
+        boot_header = "=== BOOTSTRAP TESTS SUMMARY ==="
+        if cluster_idx is not None:
+            sig_header = f"=== SIGNIFICANCE (Cluster {cluster_idx}) ==="
+            boot_header = f"=== BOOTSTRAP TESTS SUMMARY (Cluster {cluster_idx}) ==="
+
+        print(f"\n{sig_header}")
         print("\nT-Test:")
         t_stat, p_value = stats.ttest_1samp(effect, 0)
         print(f"t-stat: {t_stat:.3f}")
         print(f"p-value: {p_value:.4f}")
 
-        print("\n=== BOOTSTRAP TESTS SUMMARY ===")
+        print(f"\n{boot_header}")
         print(f"Mean lift (abs): {effect.mean():.2f}")
         print(f"95% CI (abs): [{boot_result['ci_lower_abs']:.2f}, {boot_result['ci_upper_abs']:.2f}]")
         print(f"Mean lift (%): {effect_pct.mean()*100:.2f}%")
@@ -148,13 +166,15 @@ def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effec
     """
     date_col = df.columns[0] # Assuming first col is date as per common usage
     
+    geo_name = ", ".join(treatment_geo) if isinstance(treatment_geo, list) else treatment_geo
+
     plt.figure(figsize=(14,5))
-    plt.plot(df[date_col], y, label=f"{treatment_geo} Real")
+    plt.plot(df[date_col], y, label=f"{geo_name} Real")
     plt.plot(df[date_col], synthetic, label="Synthetic", linestyle="--")
     plt.axvline(df[date_col].iloc[treatment_idx], linestyle=":", color="black", label="Treatment Start")
-    plt.title("GeoLift - Synthetic Control")
+    plt.title(f"GeoLift - Synthetic Control ({geo_name})")
     plt.xlabel("Date")
-    plt.ylabel("Metric")
+    plt.ylabel("Value")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.xticks(rotation=45)

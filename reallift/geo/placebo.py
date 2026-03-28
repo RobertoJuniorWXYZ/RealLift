@@ -11,6 +11,7 @@ def run_placebo_tests(
     observed_lift,
     n_placebos=10,
     random_state=None,
+    cluster_idx=None,
     plot=True,
     verbose=True
 ) -> dict:
@@ -25,6 +26,7 @@ def run_placebo_tests(
         observed_lift (float): The actual observed lift to compare against.
         n_placebos (int): Number of placebo tests.
         random_state (int or np.random.Generator): Random state for reproducibility.
+        cluster_idx (int or str): Optional cluster index for logging.
         plot (bool): Whether to plot the placebo distribution.
         verbose (bool): Whether to print results.
 
@@ -55,7 +57,10 @@ def run_placebo_tests(
     p_value = np.mean(np.abs(placebo_lifts) >= np.abs(observed_lift))
 
     if verbose:
-        print("\n=== PLACEBO TESTS SUMMARY ===")
+        header = "=== GEO PLACEBO TESTS ==="
+        if cluster_idx is not None:
+            header = f"=== GEO PLACEBO TESTS (Cluster {cluster_idx}) ==="
+        print(f"\n{header}")
         print(f"Number of placebo tests: {len(placebo_lifts)}")
         print(f"Average placebo lift (noise): {np.mean(placebo_lifts):.4f}")
         print(f"Observed treatment lift: {observed_lift:.4f}")

@@ -13,6 +13,7 @@ def estimate_duration(
     alpha=DEFAULT_ALPHA_TEST,
     power_target=DEFAULT_POWER,
     max_days=DEFAULT_MAX_DAYS,
+    cluster_idx=None,
     verbose=True
 ) -> dict:
     """
@@ -27,6 +28,7 @@ def estimate_duration(
         alpha (float): Significance level.
         power_target (float): Target power.
         max_days (int or list): Maximum days or list of days.
+        cluster_idx (int or str): Optional cluster index for logging.
         verbose (bool): Whether to print results.
 
     Returns:
@@ -37,14 +39,20 @@ def estimate_duration(
     df = df.dropna(subset=[date_col])
     df = df.sort_values(date_col)
 
-    if treatment_geo not in df.columns:
-        raise ValueError(f"{treatment_geo} not found")
+    if isinstance(treatment_geo, list):
+        for g in treatment_geo:
+            if g not in df.columns:
+                raise ValueError(f"Treatment geo {g} not found")
+        treatment = df[treatment_geo].mean(axis=1)
+    else:
+        if treatment_geo not in df.columns:
+            raise ValueError(f"Treatment geo {treatment_geo} not found")
+        treatment = df[treatment_geo]
 
     for g in control_geos:
         if g not in df.columns:
             raise ValueError(f"{g} not found")
 
-    treatment = df[treatment_geo]
     controls_df = df[control_geos]
 
     mean_treat = treatment.mean()
@@ -56,10 +64,15 @@ def estimate_duration(
     residual_simple = treatment - control_mean
     std_residual_simple = residual_simple.std()
 
-    df_transformed = np.log(df[[treatment_geo] + control_geos]).diff().dropna()
-
-    y = df_transformed[treatment_geo].values
-    X = df_transformed[control_geos].values
+    if isinstance(treatment_geo, list):
+        # Use log-diff on the mean treatment series
+        df_log_diff = np.log(pd.concat([treatment, df[control_geos]], axis=1)).diff().dropna()
+        y = df_log_diff.iloc[:, 0].values
+        X = df_log_diff.iloc[:, 1:].values
+    else:
+        df_transformed = np.log(df[[treatment_geo] + control_geos]).diff().dropna()
+        y = df_transformed[treatment_geo].values
+        X = df_transformed[control_geos].values
 
     model = LinearRegression()
     model.fit(X, y)
@@ -110,20 +123,22 @@ def estimate_duration(
         estimated_days = int(np.ceil(n_est))
 
     if verbose:
-        print("\n=== GEO EXPERIMENT SETUP ===")
+        header = "=== GEO DURATION ESTIMATION ==="
+        if cluster_idx is not None:
+            header = f"=== GEO DURATION ESTIMATION (Cluster {cluster_idx}) ==="
+        print(f"\n{header}")
         print(f"Treatment: {treatment_geo}")
         print(f"Control: {control_geos}")
         print("\n=== STATISTICS ===")
         print(f"Mean: {mean_treat:.2f}")
-        print(f"Std naive: {std_naive:.2f}")
-        print(f"Std residual (mean): {std_residual_simple:.2f}")
-        print(f"Std residual (regression): {std_residual_reg:.4f}")
+        print(f"Std Residual: {std_residual_reg:.4f}")
+        print(f"R-Squared: {model.score(X, y):.4f}")
         print(f"Correlation: {corr:.3f}")
         print("\n=== MDE ===")
         print(f"MDE: {mde*100:.2f}%")
         print(f"Effect absolute: {delta_abs:.2f}")
         print(f"Effect percent real: {delta_pct*100:.2f}%")
-        print("\n=== RESULT (REGRESSION) ===")
+        print("\n=== RESULT ===")
         if best_days:
             print(f"✔ Min duration: {best_days} days")
             print(f"✔ Power: {best_power:.2%}")

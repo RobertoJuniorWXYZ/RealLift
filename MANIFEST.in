@@ -1,2 +1,2 @@
 include LICENSE
-recursive-include examples *.ipynb *.csv
+recursive-include examples/geotests *.ipynb *.csv

@@ -19,57 +19,62 @@ RealLift is a powerful Python library designed to help data scientists and marke
 
 ## 🚀 Installation
 
-Install it via PyPI:
+Install the stable version via **PyPI**:
 
 ```bash
 pip install reallift
 ```
 
-Or install it directly from source:
+Or install the latest development version directly from **GitHub**:
 
 ```bash
-pip install .
+pip install git+https://github.com/RobertoJuniorWXYZ/RealLift.git
 ```
 
 ---
 
 ## ⚡ Quick Start
 
-### 1. Run a Complete Geo Experiment
+### 1. Requirements & Design
+Before starting an experiment, find the best clusters and estimate the required duration for a target MDE.
+
+```python
+from reallift import run_geo_requirements
+
+# Find best geo clusters and estimate duration
+summary = run_geo_requirements(
+    filepath="historical_data.csv",
+    date_col="date",
+    n_treatment=1,
+    mde=0.015,
+    max_days=60
+)
+```
+
+### 2. Run a Complete Geo Experiment
+Execute the full pipeline including validation, duration estimation, synthetic control, and placebo tests.
 
 ```python
 from reallift import run_geo_experiment
 
+# Run full experiment pipeline
 result = run_geo_experiment(
     filepath="your_data.csv",
     date_col="date",
     treatment_start_date="2025-05-01",
     n_treatment=1,
-    mde=0.1
+    mde=0.02
 )
 
 # Access results
 print(f"Observed Lift: {result['results'][0]['synthetic']['lift_mean_abs']:.4f}")
 ```
 
-### 2. Manual Geo Splitting
-
-```python
-from reallift import find_best_geo_split
-
-best_split = find_best_geo_split(
-    filepath="historical_data.csv",
-    date_col="date",
-    n_treatment=2
-)
-print(best_split)
-```
-
 ---
 
 ## 📖 Examples
 
-For a deep dive into the library's capabilities, check out our [demonstration notebook](examples/demo_reallift.ipynb).
+For a deep dive into the library's capabilities, check out our demonstration notebooks in the [examples/geotests/](examples/geotests/) directory.
 
 ---
 
