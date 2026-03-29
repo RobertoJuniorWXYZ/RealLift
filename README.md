@@ -1,7 +1,7 @@
 # RealLift
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/logo.png" width="350" alt="RealLift Logo">
+  <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/logo.png" width="200" style="border-radius: 10px;" alt="RealLift Logo">
 </p>
 
 **Causal Inference Library for Lift Measurement & Design of Experiments**
