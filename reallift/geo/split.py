@@ -1,42 +1,40 @@
 import pandas as pd
 import numpy as np
 from itertools import combinations
+import cvxpy as cp
 from sklearn.linear_model import ElasticNet
-from sklearn.preprocessing import StandardScaler
 from reallift.utils.preprocessing import log_diff_transform, scale_data
-from reallift.config.defaults import DEFAULT_ALPHA, DEFAULT_L1_RATIO, DEFAULT_COEF_THRESHOLD
 
 def find_best_geo_clusters(
     filepath,
     date_col,
     geos=None,
     n_treatment=3,
-    alpha=DEFAULT_ALPHA,
-    l1_ratio=DEFAULT_L1_RATIO,
-    coef_threshold=DEFAULT_COEF_THRESHOLD,
     fixed_treatment=None,
+    treatment_start_date=None,
     verbose=True
-) -> dict:
+) -> list:
     """
     Find the best geo split and build clusters for treatment and control groups.
 
     Parameters:
         filepath (str): Path to CSV file.
         date_col (str): Date column name.
-        geos (list): List of geographies.
-        n_treatment (int): Number of treatment groups.
-        alpha (float): ElasticNet alpha.
-        l1_ratio (float): ElasticNet l1_ratio.
-        coef_threshold (float): Coefficient threshold.
-        fixed_treatment (list): Fixed treatment groups.
-        verbose (bool): Whether to print results.
+        geos (list): List of candidate control geographies.
+        n_treatment (int): Number of treatment groups to simulate if fixed is None.
+        fixed_treatment (list): Hardcoded list of specific geos to treat.
+        treatment_start_date (str): YYYY-MM-DD date when treatment begins. Pre-treatment runs until this date.
+        verbose (bool): Whether to print running logs.
 
     Returns:
-        dict: Best split result including individual clusters.
+        list: List of dictionaries containing the best cluster splits.
     """
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
     df = df.dropna(subset=[date_col])
+
+    if treatment_start_date is not None:
+        df = df[df[date_col] < pd.to_datetime(treatment_start_date)]
     
     # Aggregate by date to handle duplicate entries
     # Ensures one observation per date before running the splitting algorithm
@@ -94,7 +92,35 @@ def find_best_geo_clusters(
                         idx_max = np.argmax(np.abs(coefs))
                         selected_controls = [control_pool[idx_max]]
 
-                    X_selected = df_transformed[selected_controls].values
+                    # Prune zero-weight controls using True Synthetic Optimization
+                    try:
+                        X_syn = df[selected_controls].values.astype(float)
+                        y_syn = df[list(treatment_comb)].mean(axis=1).values.astype(float)
+                        
+                        y_mean_syn = y_syn.mean()
+                        if y_mean_syn == 0: y_mean_syn = 1e-10
+                        X_mean_syn = X_syn.mean(axis=0)
+                        X_mean_syn[X_mean_syn == 0] = 1e-10
+
+                        y_norm_syn = y_syn / y_mean_syn
+                        X_norm_syn = X_syn / X_mean_syn
+
+                        w_syn = cp.Variable(len(selected_controls))
+                        alpha_syn = cp.Variable()
+
+                        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn + alpha_syn)))
+                        cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
+                        prob_syn = cp.Problem(obj_syn, cons_syn)
+                        prob_syn.solve(solver=cp.SCS, verbose=False)
+
+                        w_vals = np.array(w_syn.value).flatten()
+                        final_controls = [c for c, w_val in zip(selected_controls, w_vals) if w_val > 0.001]
+                        if len(final_controls) == 0:
+                            final_controls = selected_controls
+                    except Exception:
+                        final_controls = selected_controls
+
+                    X_selected = df_transformed[final_controls].values
                     X_selected_scaled, _ = scale_data(X_selected)
 
                     # Re-fit only on selected controls to get the final score
@@ -111,8 +137,8 @@ def find_best_geo_clusters(
                         corr = 0.0
 
                     candidate = {
-                        "treatment": treatment_comb,
-                        "control": selected_controls,
+                        "treatment": list(treatment_comb),
+                        "control": final_controls,
                         "std_residual": std_residual,
                         "correlation": corr,
                         "n_controls": len(selected_controls),

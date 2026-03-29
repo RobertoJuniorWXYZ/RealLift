@@ -22,13 +22,13 @@ def run_synthetic_control(
     Parameters:
         filepath (str): Path to CSV file.
         date_col (str): Date column name.
-        treatment_geo (str): Treatment geography.
+        treatment_geo (str or list): Treatment geography or list of geographies.
         control_geos (list): Control geographies.
-        treatment_start_date (str): Treatment start date.
-        random_state (int or np.random.Generator): Random state for reproducibility.
-        cluster_idx (int or str): Optional cluster index for logging.
-        plot (bool): Whether to plot.
-        verbose (bool): Whether to print results.
+        treatment_start_date (str): Treatment start date, separating pre-test and post-test periods.
+        random_state (int or np.random.Generator): Random state for reproducible permutations.
+        cluster_idx (int or str): Optional cluster index for logging traceability.
+        plot (bool): Whether to plot the baseline graph.
+        verbose (bool): Whether to print verbose logging results.
 
     Returns:
         dict: Synthetic control result.
@@ -38,7 +38,13 @@ def run_synthetic_control(
     df = df.dropna(subset=[date_col])
     df = df.sort_values(date_col).reset_index(drop=True)
 
-    treatment_idx = df[df[date_col] >= pd.to_datetime(treatment_start_date)].index[0]
+    post_data = df[df[date_col] >= pd.to_datetime(treatment_start_date)]
+    is_pre_only = len(post_data) == 0
+
+    if is_pre_only:
+        treatment_idx = len(df)
+    else:
+        treatment_idx = post_data.index[0]
 
     if isinstance(treatment_geo, list):
         y = df[treatment_geo].mean(axis=1).values.astype(float)
@@ -47,8 +53,10 @@ def run_synthetic_control(
 
     X = df[control_geos].values.astype(float)
 
-    y_mean = y[:treatment_idx].mean()
-    X_mean = X[:treatment_idx].mean(axis=0)
+    y_mean = y[:treatment_idx].mean() if treatment_idx > 0 else 1e-10
+    if y_mean == 0: y_mean = 1e-10
+    X_mean = X[:treatment_idx].mean(axis=0) if treatment_idx > 0 else X.mean(axis=0) + 1e-10
+    X_mean[X_mean == 0] = 1e-10
 
     y_norm = y / y_mean
     X_norm = X / X_mean
@@ -80,17 +88,33 @@ def run_synthetic_control(
     pre_synth = synthetic[:treatment_idx]
     pre_error = np.mean(np.abs(pre_real - pre_synth))
 
-    post_real = y[treatment_idx:]
-    post_synth = synthetic[treatment_idx:]
-    effect = post_real - post_synth
+    if is_pre_only:
+        post_real = np.array([])
+        post_synth = np.array([])
+        effect = np.array([])
+        lift_abs = 0.0
+        effect_pct = np.array([])
+        lift_pct = 0.0
+        lift_total = 0.0
+        boot_result = {
+            "p_value": 1.0,
+            "ci_lower_pct": 0.0, "ci_upper_pct": 0.0,
+            "ci_lower_total_pct": 0.0, "ci_upper_total_pct": 0.0,
+            "ci_lower_abs": 0.0, "ci_upper_abs": 0.0,
+            "ci_lower_total_abs": 0.0, "ci_upper_total_abs": 0.0
+        }
+    else:
+        post_real = y[treatment_idx:]
+        post_synth = synthetic[treatment_idx:]
+        effect = post_real - post_synth
 
-    lift_abs = effect.mean()
-    effect_pct = effect / post_synth
-    lift_pct = np.mean(effect_pct)
-    lift_total = effect.sum()
+        lift_abs = effect.mean()
+        effect_pct = effect / post_synth
+        lift_pct = np.mean(effect_pct)
+        lift_total = effect.sum()
 
-    # Bootstrap
-    boot_result = bootstrap_significance(effect, post_synth, random_state=random_state)
+        # Bootstrap
+        boot_result = bootstrap_significance(effect, post_synth, random_state=random_state)
 
     if verbose:
         header = "=== GEO SYNTHETIC CONTROL ==="
@@ -99,7 +123,8 @@ def run_synthetic_control(
         print(f"\n{header}")
         print("\nWeights:")
         for geo, w_val in zip(control_geos, weights):
-            print(f"{geo}: {w_val:.4f}")
+            if w_val > 0.001:
+                print(f"{geo}: {w_val:.4f}")
 
         print("\nTreatment period:")
         start_date = df[date_col].iloc[treatment_idx].strftime('%Y-%m-%d')
@@ -125,13 +150,15 @@ def run_synthetic_control(
         print(f"p-value: {p_value:.4f}")
 
         print(f"\n{boot_header}")
-        print(f"Mean lift (abs): {effect.mean():.2f}")
-        print(f"95% CI (abs): [{boot_result['ci_lower_abs']:.2f}, {boot_result['ci_upper_abs']:.2f}]")
-        print(f"Mean lift (%): {effect_pct.mean()*100:.2f}%")
-        print(f"95% CI (%): [{boot_result['ci_lower_pct']*100:.2f}%, {boot_result['ci_upper_pct']*100:.2f}%]")
+        print(f"Total lift (abs): {lift_total:.2f}")
+        print(f"95% CI (abs): [{boot_result['ci_lower_total_abs']:.2f}, {boot_result['ci_upper_total_abs']:.2f}]")
+        
+        total_lift_pct = lift_total / post_synth.sum()
+        print(f"Total lift (%): {total_lift_pct*100:.2f}%")
+        print(f"95% CI (%): [{boot_result['ci_lower_total_pct']*100:.2f}%, {boot_result['ci_upper_total_pct']*100:.2f}%]")
         print(f"p-value (bootstrap): {boot_result['p_value_boot']:.4f}")
 
-        if boot_result['ci_lower_abs'] > 0 or boot_result['ci_upper_abs'] < 0:
+        if boot_result['ci_lower_total_abs'] > 0 or boot_result['ci_upper_total_abs'] < 0:
             print("✔ Lift statistically significant (CI does not cross 0)")
         else:
             print("⚠️ Lift NOT significant (CI crosses 0)")

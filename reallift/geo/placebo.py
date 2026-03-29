@@ -22,13 +22,13 @@ def run_placebo_tests(
         filepath (str): Path to CSV file.
         date_col (str): Date column name.
         control_geos (list): Control geographies.
-        treatment_start_date (str): Treatment start date.
-        observed_lift (float): The actual observed lift to compare against.
-        n_placebos (int): Number of placebo tests.
+        treatment_start_date (str): YYYY-MM-DD Treatment start date.
+        observed_lift (float): The actual observed lift absolute to compare against.
+        n_placebos (int): Maximum number of placebo tests to run randomly.
         random_state (int or np.random.Generator): Random state for reproducibility.
-        cluster_idx (int or str): Optional cluster index for logging.
-        plot (bool): Whether to plot the placebo distribution.
-        verbose (bool): Whether to print results.
+        cluster_idx (int or str): Optional cluster index for logging traceability.
+        plot (bool): Whether to plot the two-sided placebo distribution.
+        verbose (bool): Whether to print logging results.
 
     Returns:
         dict: Placebo test results.

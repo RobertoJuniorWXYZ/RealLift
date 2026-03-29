@@ -19,7 +19,9 @@ def generate_geolift_data(
     save_csv=False,
     save_pre_only=False,
     file_name="synthetic_geolift.csv",
-    pre_file_name="synthetic_geolift_pre.csv"
+    pre_file_name="synthetic_geolift_pre.csv",
+    base_value=50.0,
+    as_integer=False
 ) -> tuple:
     """
     Generate synthetic GeoLift data.
@@ -37,11 +39,13 @@ def generate_geolift_data(
         treatment_start (str): Treatment start date.
         lift (float): Lift effect.
         random_seed (int): Random seed.
-        plot (bool): Whether to plot.
-        save_csv (bool): Whether to save CSV.
-        save_pre_only (bool): Whether to save pre-treatment data.
-        file_name (str): CSV file name.
-        pre_file_name (str): Pre-treatment CSV file name.
+        plot (bool): Whether to plot the generated simulation data.
+        save_csv (bool): Whether to save CSV files explicitly.
+        save_pre_only (bool): If True, do not save post-test data, only pre-test data.
+        file_name (str): Expected output CSV file name for the complete dataset.
+        pre_file_name (str): Expected output CSV file name for the pre-treatment period data.
+        base_value (float or list or tuple): Base generation metric (e.g. baseline sales volume). If list [min, max], randomize between range.
+        as_integer (bool): If True, casts the simulated output dataframe strictly into integers.
 
     Returns:
         tuple: (df, df_pre, treatment_geos)
@@ -65,13 +69,32 @@ def generate_geolift_data(
 
         trend = trend_slope * t
         seasonality = seasonality_amplitude * np.sin(2 * np.pi * t / seasonality_period)
-        noise = np.random.normal(0, noise_std, len(t))
+        
+        if isinstance(noise_std, (list, tuple)) and len(noise_std) == 2:
+            current_noise = np.random.uniform(noise_std[0], noise_std[1])
+        else:
+            current_noise = noise_std
+            
+        noise = np.random.normal(0, current_noise, len(t))
 
-        series = 50 + trend + seasonality + noise
+        if isinstance(base_value, (list, tuple)) and len(base_value) == 2:
+            current_base = np.random.uniform(base_value[0], base_value[1])
+        else:
+            current_base = base_value
+
+        series = current_base + trend + seasonality + noise
 
         if geo_name in treatment_geos:
+            if isinstance(lift, (list, tuple)) and len(lift) == 2:
+                current_lift = np.random.uniform(lift[0], lift[1])
+            else:
+                current_lift = lift
+                
             mask = dates >= pd.to_datetime(treatment_start)
-            series[mask] = series[mask] * (1 + lift)
+            series[mask] = series[mask] * (1 + current_lift)
+
+        if as_integer:
+            series = np.round(series).astype(int)
 
         df[geo_name] = series
 
@@ -93,8 +116,9 @@ def generate_geolift_data(
 
     if save_csv:
         df.to_csv(file_name, index=False)
-
-    if save_pre_only:
+        df_pre.to_csv(pre_file_name, index=False)
+        
+    elif save_pre_only:
         df_pre.to_csv(pre_file_name, index=False)
 
     return df, df_pre, treatment_geos

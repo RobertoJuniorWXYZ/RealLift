@@ -13,6 +13,7 @@ def estimate_duration(
     alpha=DEFAULT_ALPHA_TEST,
     power_target=DEFAULT_POWER,
     max_days=DEFAULT_MAX_DAYS,
+    treatment_start_date=None,
     cluster_idx=None,
     verbose=True
 ) -> dict:
@@ -26,10 +27,11 @@ def estimate_duration(
         control_geos (list): Control geographies.
         mde (float): Minimum detectable effect.
         alpha (float): Significance level.
-        power_target (float): Target power.
-        max_days (int or list): Maximum days or list of days.
-        cluster_idx (int or str): Optional cluster index for logging.
-        verbose (bool): Whether to print results.
+        power_target (float): Target power (typically 0.8 / 80%).
+        max_days (int or list): Maximum days limit for the duration, or a range [min, max] like [21, 60].
+        treatment_start_date (str): Treatment start date to filter data exclusively to the pre-treatment period.
+        cluster_idx (int or str): Optional cluster index for logging traceability.
+        verbose (bool): Whether to print logging results.
 
     Returns:
         dict: Duration estimation result.
@@ -37,7 +39,14 @@ def estimate_duration(
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
     df = df.dropna(subset=[date_col])
+    
+    if treatment_start_date is not None:
+        df = df[df[date_col] < pd.to_datetime(treatment_start_date)]
+
     df = df.sort_values(date_col)
+
+    start_date_str = df[date_col].iloc[0].strftime('%Y-%m-%d')
+    end_date_str = df[date_col].iloc[-1].strftime('%Y-%m-%d')
 
     if isinstance(treatment_geo, list):
         for g in treatment_geo:
@@ -93,6 +102,8 @@ def estimate_duration(
 
     if isinstance(max_days, int):
         days_list = list(range(7, max_days + 1))
+    elif isinstance(max_days, (list, tuple)) and len(max_days) == 2:
+        days_list = list(range(max_days[0], max_days[1] + 1))
     else:
         days_list = sorted(max_days)
 
@@ -129,7 +140,12 @@ def estimate_duration(
         print(f"\n{header}")
         print(f"Treatment: {treatment_geo}")
         print(f"Control: {control_geos}")
-        print("\n=== STATISTICS ===")
+        
+        print("\n=== EVALUATING PERIOD ===")
+        print(f"Start Date: {start_date_str}")
+        print(f"End Date: {end_date_str}")
+
+        print("\n=== REGRESSION STATISTICS ===")
         print(f"Mean: {mean_treat:.2f}")
         print(f"Std Residual: {std_residual_reg:.4f}")
         print(f"R-Squared: {model.score(X, y):.4f}")
@@ -148,10 +164,13 @@ def estimate_duration(
 
     return {
         "summary": {
+            "start_date": start_date_str,
+            "end_date": end_date_str,
             "mean": mean_treat,
             "std_naive": std_naive,
             "std_residual_simple": std_residual_simple,
             "std_residual_regression": std_residual_reg,
+            "r_squared": model.score(X, y),
             "correlation": corr,
             "mde": mde,
             "delta_log": delta,

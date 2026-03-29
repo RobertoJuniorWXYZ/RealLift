@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
+import cvxpy as cp
 import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from reallift.utils.metrics import mape, wape, compute_r2
@@ -27,13 +27,14 @@ def validate_geo_groups(
         filepath (str): Path to CSV file.
         date_col (str): Date column name.
         splits (dict or list): Split results.
-        treatment_start_date (str): Date when treatment starts. Data from this date onwards will be excluded.
+        treatment_start_date (str): Treatment start date. Data from this date onwards will be excluded from the training metric calculation.
         train_test_split (float): Train/test split ratio (used if n_folds=1).
-        n_folds (int): Number of folds for Time Series Cross-Validation. If 1, uses a single train/test split.
-        plot (bool): Whether to plot.
-        export_csv (bool): Whether to export CSV.
-        output_prefix (str): Output prefix.
-        verbose (bool): Whether to print results.
+        n_folds (int): Number of folds for Time Series Cross-Validation evaluating the Convex Synthetic constraint. If 1, uses static temporal split.
+        plot (bool): Whether to display a validation prediction plot per cluster.
+        export_csv (bool): Whether to export CSV mapping.
+        output_prefix (str): Output prefix for exported CVS.
+        cluster_idx (int): Optional cluster ID assigned to the output for traceability.
+        verbose (bool): Whether to print logging results.
 
     Returns:
         dict: Validation result.
@@ -58,6 +59,12 @@ def validate_geo_groups(
     df = df.groupby(date_col).sum(numeric_only=True).reset_index()
     df = df.sort_values(date_col).reset_index(drop=True)
 
+    if df.empty:
+        raise ValueError("Dataset is empty after date and given filters.")
+
+    start_date_str = df[date_col].iloc[0].strftime('%Y-%m-%d')
+    end_date_str = df[date_col].iloc[-1].strftime('%Y-%m-%d')
+
     if isinstance(splits, dict):
         splits = [splits]
 
@@ -76,11 +83,47 @@ def validate_geo_groups(
             print(f"Treatment: {treatment}")
             print(f"Control: {controls}")
 
+            print(f"\n=== EVALUATING PERIOD ===")
+            print(f"Start Date: {start_date_str}")
+            print(f"End Date: {end_date_str}")
+
         # =====================================================
-        # 🔵 MODELO NÍVEL (REAL)
+        # 🔵 PREPARE VARIABLES
         # =====================================================
-        y = df[treatment].mean(axis=1)
-        X = df[controls].sum(axis=1)
+        y = df[treatment].mean(axis=1).values.astype(float)
+        X = df[controls].values.astype(float)
+        
+        def solve_cv_synthetic(X_train, y_train, X_test):
+            y_mean = y_train.mean()
+            if y_mean == 0: y_mean = 1e-10
+            X_mean = X_train.mean(axis=0)
+            X_mean[X_mean == 0] = 1e-10
+
+            y_norm = y_train / y_mean
+            X_norm = X_train / X_mean
+
+            w = cp.Variable(X_train.shape[1])
+            alpha_intercept = cp.Variable()
+
+            obj = cp.Minimize(cp.sum_squares(y_norm - (X_norm @ w + alpha_intercept)))
+            cons = [w >= 0, cp.sum(w) == 1]
+            prob = cp.Problem(obj, cons)
+            try:
+                prob.solve(solver=cp.SCS, verbose=False)
+                weights = np.array(w.value).flatten()
+                intercept_val = float(alpha_intercept.value)
+            except:
+                weights = np.ones(X_train.shape[1]) / X_train.shape[1]
+                intercept_val = 0.0
+
+            X_test_norm = X_test / X_mean
+            y_pred_norm_test = X_test_norm @ weights + intercept_val
+            y_pred_test = y_pred_norm_test * y_mean
+            
+            y_pred_norm_train = X_norm @ weights + intercept_val
+            y_pred_train = y_pred_norm_train * y_mean
+            
+            return y_pred_train, y_pred_test
 
         # =========================
         # 🟢 CROSS-VALIDATION OR STATIC TREND VALIDATION
@@ -110,16 +153,12 @@ def validate_geo_groups(
                 if fold_idx == 0:
                     first_test_idx = test_idx[0]
                 
-                X_train_cv = X.iloc[train_idx].values.reshape(-1, 1)
-                y_train_cv = y.iloc[train_idx]
-                X_test_cv = X.iloc[test_idx].values.reshape(-1, 1)
-                y_test_cv = y.iloc[test_idx]
+                X_train_cv = X[train_idx]
+                y_train_cv = y[train_idx]
+                X_test_cv = X[test_idx]
+                y_test_cv = y[test_idx]
 
-                cv_model = LinearRegression()
-                cv_model.fit(X_train_cv, y_train_cv)
-                
-                y_pred_train_cv = cv_model.predict(X_train_cv)
-                y_pred_cv = cv_model.predict(X_test_cv)
+                y_pred_train_cv, y_pred_cv = solve_cv_synthetic(X_train_cv, y_train_cv, X_test_cv)
                 y_pred_oof[test_idx] = y_pred_cv
                 
                 cv_results.append({
@@ -171,16 +210,12 @@ def validate_geo_groups(
             test_size = int(n * train_test_split)
             train_size = n - test_size
 
-            X_train = X.iloc[:train_size].values.reshape(-1, 1)
-            y_train = y.iloc[:train_size]
-            X_test = X.iloc[train_size:].values.reshape(-1, 1)
-            y_test = y.iloc[train_size:]
+            X_train = X[:train_size]
+            y_train = y[:train_size]
+            X_test = X[train_size:]
+            y_test = y[train_size:]
 
-            model = LinearRegression()
-            model.fit(X_train, y_train)
-
-            y_pred_train = model.predict(X_train)
-            y_pred_test = model.predict(X_test)
+            y_pred_train, y_pred_test = solve_cv_synthetic(X_train, y_train, X_test)
             y_pred_final = np.concatenate([y_pred_train, y_pred_test])
 
             r2_train_display = float(r2_score(y_train, y_pred_train))
@@ -256,6 +291,8 @@ def validate_geo_groups(
         summary_results.append({
             "treatment": treatment,
             "control": controls,
+            "start_date": start_date_str,
+            "end_date": end_date_str,
             "r2_train": r2_train_display,
             "r2_test": r2_display,
             "mape_train": mape_train_display,

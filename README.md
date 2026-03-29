@@ -1,31 +1,30 @@
-# 🚀 RealLift
+# RealLift
 
-**Causal Inference Library for Lift Measurement**
+**Causal Inference Library for Lift Measurement & Design of Experiments**
 
-RealLift is a powerful Python library designed to help data scientists and marketers measure the true impact of their interventions (treatments) using advanced causal inference techniques, such as **GeoLift**, **Synthetic Control**, and **Placebo Testing**.
-
----
-
-## ✨ Features
-
-- **🎯 Geo-Splitting**: Automatically find the best treatment and control groups based on historical correlation.
-- **📈 Synthetic Control**: Build counterfactuals using a weighted combination of control regions.
-- **🧪 Significance Testing**: Robust bootstrap-based confidence intervals and p-values.
-- **🛡️ Placebo Tests**: Validate your model's reliability by running "fake" experiments on control groups.
-- **⏳ Duration Estimation**: Calculate the necessary experiment duration based on MDE (Minimum Detectable Effect).
-- **📊 Professional Visualizations**: Built-in plotting for experiment results and validation.
+RealLift is an advanced Python library engineered to assist data scientists and analysts in reliably measuring the true incremental impact of interventions through rigorous causal inference methodologies, such as **GeoLift**, **Synthetic Control Estimation**, and **Placebo Testing**.
 
 ---
 
-## 🚀 Installation
+## Capabilities
 
-Install the stable version via **PyPI**:
+- **Design of Experiments (Geo-Splitting)**: Algorithmically identifies structural clusters and mathematically selects the optimal treatment and control regions based on ElasticNet feature selection and convex proximity matrices.
+- **Synthetic Control Measurement**: Formulates robust counterfactual interventions by mapping temporal correlations across a predefined array of donor regions via constrained Convex Optimization (`cvxpy`).
+- **Time Series Cross-Validation**: Ensures predictive validity of counterfactuals via Historical Simulation, isolating definitive Out-Of-Fold (OOF) $R^2$ and MAPE limits prior to experiments.
+- **Duration & Statistical Power**: Estimates predictive power dynamically over time streams to establish strict Minimum Detectable Effect (MDE) bounds before test implementation.
+- **Significance & Placebo Testing**: Empirically defends the analytical conclusions through non-parametric bootstrap sampling and randomized spatial placebo permutations to comprehensively evaluate the null hypothesis.
+
+---
+
+## Installation
+
+RealLift is securely distributed through **PyPI** for production environments:
 
 ```bash
 pip install reallift
 ```
 
-Or install the latest development version directly from **GitHub**:
+Alternatively, obtain the latest development snapshot directly from the source repository:
 
 ```bash
 pip install git+https://github.com/RobertoJuniorWXYZ/RealLift.git
@@ -33,62 +32,70 @@ pip install git+https://github.com/RobertoJuniorWXYZ/RealLift.git
 
 ---
 
-## ⚡ Quick Start
+## Quick Start Guide
 
-### 1. Requirements & Design
-Before starting an experiment, find the best clusters and estimate the required duration for a target MDE.
+### 1. Requirements & Design (Pre-Test Phase)
+Before executing a field intervention, analyze the underlying baseline correlation to discover optimal clusters and project the duration strictly necessary to capture a target Minimum Detectable Effect (MDE).
 
 ```python
 from reallift import run_geo_requirements
 
-# Find best geo clusters and estimate duration
+# Identify structural blocks and validate exposure durations
 summary = run_geo_requirements(
     filepath="historical_data.csv",
     date_col="date",
     n_treatment=1,
     mde=0.015,
-    max_days=60
+    max_days=[21, 60],
+    n_folds=5,
+    verbose=True
 )
 ```
 
-### 2. Run a Complete Geo Experiment
-Execute the full pipeline including validation, duration estimation, synthetic control, and placebo tests.
+### 2. Intervention Measurement (Post-Test Phase)
+Following the completion of an intervention, apply the algorithmic pipeline encompassing validation constraint-checking, Synthetic Control extraction, and empirical Placebo diagnostics.
 
 ```python
 from reallift import run_geo_experiment
 
-# Run full experiment pipeline
+# Execute the complete analytical pipeline
 result = run_geo_experiment(
-    filepath="your_data.csv",
+    filepath="experiment_data.csv",
     date_col="date",
     treatment_start_date="2025-05-01",
     n_treatment=1,
-    mde=0.02
+    mde=0.015,
+    max_days=[21, 60],
+    n_folds=5,
+    random_state=42,
+    verbose=True
 )
 
-# Access results
-print(f"Observed Lift: {result['results'][0]['synthetic']['lift_mean_abs']:.4f}")
+# Extract total absolute impact estimates
+print(f"Incremental Lift (abs): {result['results'][0]['synthetic']['lift_total']:.2f}")
 ```
 
 ---
 
-## 📖 Examples
+## Examples & Application
 
-For a deep dive into the library's capabilities, check out our demonstration notebooks in the [examples/geotests/](examples/geotests/) directory.
-
----
-
-## 🛠️ Requirements
-
-- Python 3.8+
-- Pandas, Numpy, Scikit-Learn, Scipy, Matplotlib, CVXPY
+For a comprehensive methodological demonstration concerning correlation assumptions, feature engineering operations, and diagnostic evaluation limits, refer to the Jupyter notebooks mapped under the `examples/geotests/` directory within the primary repository.
 
 ---
 
-## 📄 License
+## Systems & Dependencies
 
-MIT License. See [LICENSE](LICENSE) for details.
+- **Platform Target**: Python 3.8+
+- **Mathematics**: `cvxpy` (Core algorithmic solver for constraints)
+- **Data Engineering**: `pandas`, `numpy`, `scikit-learn`, `scipy`
+- **Plotting Engines**: `matplotlib`, `seaborn`
 
 ---
 
-Developed with ❤️ by **Roberto Junior**
+## License
+
+MIT License. Navigate to the `LICENSE` file for full disclosure.
+
+---
+
+Developed by **Roberto Junior**.

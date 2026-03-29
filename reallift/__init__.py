@@ -11,4 +11,4 @@ from .geo import (
 from .pipelines.geo_pipeline import run_geo_experiment, run_geo_requirements
 from .simulation import generate_geolift_data
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
