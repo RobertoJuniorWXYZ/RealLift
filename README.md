@@ -14,7 +14,7 @@ RealLift is an advanced Python library engineered to assist data scientists and 
 
 - **Design of Experiments (Geo-Splitting)**: Algorithmically identifies structural clusters and mathematically selects the optimal treatment and control regions based on ElasticNet feature selection and convex proximity matrices.
 - **Synthetic Control Measurement**: Formulates robust counterfactual interventions by mapping temporal correlations across a predefined array of donor regions via constrained Convex Optimization (`cvxpy`).
-- **Time Series Cross-Validation**: Ensures predictive validity of counterfactuals via Historical Simulation, isolating definitive Out-Of-Fold (OOF) $R^2$ and MAPE limits prior to experiments.
+- **Time Series Cross-Validation**: Ensures predictive validity of counterfactuals via Historical Simulation, isolating definitive Out-Of-Fold (OOF) R² and MAPE limits prior to experiments.
 - **Duration & Statistical Power**: Estimates predictive power dynamically over time streams to establish strict Minimum Detectable Effect (MDE) bounds before test implementation.
 - **Significance & Placebo Testing**: Empirically defends the analytical conclusions through non-parametric bootstrap sampling and randomized spatial placebo permutations to comprehensively evaluate the null hypothesis.
 
