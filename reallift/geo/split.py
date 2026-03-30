@@ -57,9 +57,20 @@ def find_best_geo_clusters(
         # to find its own best controls, avoiding identical metrics.
         treatment_combinations = [[t] for t in fixed_treatment]
     else:
-        treatment_combinations = combinations(geos, n_treatment)
+        treatment_combinations = list(combinations(geos, n_treatment))
 
-    for treatment_comb in treatment_combinations:
+    if verbose:
+        try:
+            from tqdm import tqdm
+            iterator = tqdm(treatment_combinations, desc="Evaluating Combinations", leave=True)
+        except ImportError:
+            iterator = treatment_combinations
+            print(f"Evaluating {len(treatment_combinations)} combinations... This might take a while.")
+    else:
+        iterator = treatment_combinations
+
+    for treatment_comb in iterator:
+        treatment_comb = list(treatment_comb)
         # Exclude ALL treatment geos from the control pool, not just the current combination
         forbidden_geos = set(treatment_comb).union(all_treatment_geos)
         control_pool = [g for g in geos if g not in forbidden_geos]
@@ -93,6 +104,7 @@ def find_best_geo_clusters(
                         selected_controls = [control_pool[idx_max]]
 
                     # Prune zero-weight controls using True Synthetic Optimization
+                    final_weights = []
                     try:
                         X_syn = df[selected_controls].values.astype(float)
                         y_syn = df[list(treatment_comb)].mean(axis=1).values.astype(float)
@@ -114,11 +126,22 @@ def find_best_geo_clusters(
                         prob_syn.solve(solver=cp.SCS, verbose=False)
 
                         w_vals = np.array(w_syn.value).flatten()
-                        final_controls = [c for c, w_val in zip(selected_controls, w_vals) if w_val > 0.001]
-                        if len(final_controls) == 0:
+                        final_controls_with_w = [(c, w_val) for c, w_val in zip(selected_controls, w_vals) if w_val > 0.001]
+                        
+                        if len(final_controls_with_w) == 0:
                             final_controls = selected_controls
+                            final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
+                        else:
+                            final_controls = [x[0] for x in final_controls_with_w]
+                            final_weights = [x[1] for x in final_controls_with_w]
+                            
+                            # Normalize so they sum exactly to 1.0 
+                            sum_w = sum(final_weights)
+                            if sum_w > 0:
+                                final_weights = [w / sum_w for w in final_weights]
                     except Exception:
                         final_controls = selected_controls
+                        final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
 
                     X_selected = df_transformed[final_controls].values
                     X_selected_scaled, _ = scale_data(X_selected)
@@ -139,8 +162,10 @@ def find_best_geo_clusters(
                     candidate = {
                         "treatment": list(treatment_comb),
                         "control": final_controls,
+                        "control_weights": final_weights,
                         "std_residual": std_residual,
                         "correlation": corr,
+                        "synthetic_error_ratio": std_residual / (corr + 1e-6),
                         "n_controls": len(selected_controls),
                         "alpha": a,
                         "l1_ratio": l1
@@ -161,27 +186,64 @@ def find_best_geo_clusters(
         raise ValueError("No valid combinations found.")
 
     # Sort results to find the best overall
-    results = sorted(results, key=lambda x: x["std_residual"] / (x["correlation"] + 1e-6))
+    results = sorted(results, key=lambda x: x["synthetic_error_ratio"])
     
     # NEW: Return all evaluated combinations as clusters
     # This ensures that each fixed treatment gets its own cluster with unique metrics.
     clusters = []
     for i, res in enumerate(results):
         clusters.append({
-            "treatment": res["treatment"], # Keep full treatment list
+            "treatment": res["treatment"],
             "control": res["control"],
+            "control_weights": res["control_weights"],
             "correlation": res["correlation"],
             "std_residual": res["std_residual"],
+            "synthetic_error_ratio": res["synthetic_error_ratio"],
             "n_controls": res["n_controls"],
             "alpha": res["alpha"],
             "l1_ratio": res["l1_ratio"]
         })
 
+    from IPython.display import display
+    
     if verbose:
-        print("\n=== BEST CLUSTERS FOUND ===")
-        # Limit to top 5 if not using fixed_treatment to avoid spam
+        if fixed_treatment is None:
+            print("\n\n" + "-"*60)
+            print("SEARCH ENGINE COMPLETED")
+            print(f"Top {min(len(clusters), 5)} experiment design recommendations (ranked by lowest numerical risk):")
+            print("Tip: Recommendation 0 is statistically your most precise choice for simulation.")
+            print("     It minimizes the 'Synthetic Error Ratio' (Std Residual / Correlation), balancing low error with high synchronization.")
+            print("-"*60)
+            label_prefix = "RECOMMENDATION"
+        else:
+            print("\n\n" + "-"*60)
+            print("FIXED TREATMENT ANALYSIS COMPLETED")
+            print("Evaluating exclusive Synthetic Controls for the mandatory treatment units.")
+            print("-"*60)
+            label_prefix = "TEST CLUSTER"
+
+        print("\n" + "="*60)
+        print(" FINAL RESULTS (DONOR POOL & WEIGHTS) ".center(60, "="))
+        print("="*60)
+        
         display_clusters = clusters if fixed_treatment else clusters[:5]
+        
         for i, c in enumerate(display_clusters):
-            print(f"Cluster {i}: Treatment {c['treatment']}, Correlation {c['correlation']:.4f}")
+            treatment_str = ", ".join(c['treatment'])
+            print(f"\n{label_prefix} {i} | Treatment: [{treatment_str}] | Correlation: {c['correlation']:.4f} | Std Residual: {c['std_residual']:.4f} | Synthetic Error Ratio: {c['synthetic_error_ratio']:.4f}")
+            print("-" * 60)
+            
+            controls_with_weights = list(zip(c['control'], c.get('control_weights', [])))
+            sorted_controls = sorted(controls_with_weights, key=lambda x: x[1], reverse=True)
+            donor_strings = [f"{geo} ({w:.2%})" for geo, w in sorted_controls]
+            
+            print("Donor Pool:")
+            # Display horizontally in a tabular grid (4 items per row)
+            for j in range(0, len(donor_strings), 4):
+                chunk = donor_strings[j:j+4]
+                row_str = "".join(f"{item:<20}" for item in chunk)
+                print("  " + row_str)
+                
+        print("\n" + "="*60)
 
     return clusters if fixed_treatment else clusters[:5]
