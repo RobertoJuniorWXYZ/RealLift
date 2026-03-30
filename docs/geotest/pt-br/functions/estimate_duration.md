@@ -26,7 +26,9 @@ def estimate_duration(
 2. **Resíduo de Regressão Basal OLS**: Processa um estimador canônico OLS (`LinearRegression`) cruzando o Tratamento com os Controles nos deltas subjacentes logarítmicos. O OLS purga a variância sistêmica sazonal comum e nos fornece o **puro ruído assíncrono indetectável**, representado pelo desvio padrão de *Mismatch* $\sigma_{reg}$.
 3. **Poder sobre Distribuição Normal**: Retrógrado converte a razão `mde` infundida numa métrica de deslocamento ($Y$) Logarítmico (Delta Efeito Absoluto $\Delta$). E modela iterativamente o limiar Gaussian da Força $(1-\beta)$ a cada período de exposição ($n$ dias):
 
-$$ (1-\beta) = \Phi \left( \frac{\Delta}{\sigma_{reg} / \sqrt{n}} - Z_{1-\alpha/2} \right) $$
+$$
+(1-\beta) = \Phi \left( \frac{\Delta}{\sigma_{reg} / \sqrt{n}} - Z_{1-\alpha/2} \right)
+$$
 
 O solver itera contiguamente o $n$ dia a dia, constrito na margem declarada em `max_days`. O ciclo interrompe quando a integral cruzada da Força suplanta definitivamente a variável `power_target` ($\approx 0.80$).
 

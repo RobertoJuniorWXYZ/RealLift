@@ -35,6 +35,7 @@ Para evitar que o modelo seja enganado por tendências de longo prazo ou distor�
 Com muitas cidades no controle, comparar todas geraria ruído (*overfitting*). A função utiliza um modelo de regressão **ElasticNet** que avalia os doadores e naturalmente "zera" a relevância das cidades que não ajudam a explicar o tratamento. 
 
 *Fórmula da Otimização ElasticNet minimizada:*
+
 $$
 \min_{w} \frac{1}{2n} ||Xw - y||^2_2 + \alpha \cdot L1_{ratio} \cdot ||w||_1 + 0.5 \cdot \alpha \cdot (1 - L1_{ratio}) \cdot ||w||_2^2
 $$

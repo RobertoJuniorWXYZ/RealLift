@@ -27,7 +27,9 @@ Os hiper-campos então despacham a problemática como uma fronteira de redução
 ### Projeção Diferencial Contrafactual (Efeito Absoluto Pós)
 O solver descobre a "Super Cifra" de pesos globais ($W$). Esses pesos são transportados e transpostos imutavelmente atrelados à variação temporal futura da base inexplorada do grupo de controles pós-período:
 
-$$ \hat{Y}_{post} = \sum X_{post} \cdot W_{SCS} + \alpha_{SCS} $$
+$$
+\hat{Y}_{post} = \sum X_{post} \cdot W_{SCS} + \alpha_{SCS}
+$$
 
 Subtraindo por conseguinte a contagem bruta vendida real ($Y_t$ oficial da cidade alvo) perante sua projeção sintética fictícia construída pelos pares do estado, atinge-se limpidamente o valor exato incremental do Projeto de Intelecção Causal ($E_{Lift} = Y_{post} - \hat{Y}_{post}$). 
 

@@ -30,7 +30,9 @@ A execução dessa preposição instiga rigorosamente a emulação de permuta ma
 Ao final da estafante malha de inferência iterada randômica no teto limite tolerável `n_placebos`, junta-se as flutuações amostrais falsas num *Array* $|L_{placebo}|$ em formato não-sinalizado absoluto.
 Deriva-se então a proeminência exata com intersecção ao seu verdadeiro e único Lift factual de projeto capturado ($|L_{observed}|$) pela equação baseada em simulação Monte Carlo restritiva:
 
-$$ P_{Value\_Empirico} = \frac{\sum_{i=1}^{P} \mathbf{I} \big(|L_{placebo\_i}| \ge |L_{observed}|\big)}{P} $$
+$$
+P_{Value\_Empirico} = \frac{\sum_{i=1}^{P} \mathbf{I} \big(|L_{placebo\_i}| \ge |L_{observed}|\big)}{P}
+$$
 
 *(Onde $\mathbf{I}(\cdot)$ assume representatividade modular unitária 1 de indicador relacional caso falhe localmente).*
 
