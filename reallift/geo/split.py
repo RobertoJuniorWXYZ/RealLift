@@ -12,6 +12,7 @@ def find_best_geo_clusters(
     n_treatment=3,
     fixed_treatment=None,
     treatment_start_date=None,
+    use_elasticnet=True,
     verbose=True
 ) -> list:
     """
@@ -24,6 +25,7 @@ def find_best_geo_clusters(
         n_treatment (int): Number of treatment groups to simulate if fixed is None.
         fixed_treatment (list): Hardcoded list of specific geos to treat.
         treatment_start_date (str): YYYY-MM-DD date when treatment begins. Pre-treatment runs until this date.
+        use_elasticnet (bool): Whether to use ElasticNet to pre-filter controls before SCM optimization.
         verbose (bool): Whether to print running logs.
 
     Returns:
@@ -46,8 +48,8 @@ def find_best_geo_clusters(
 
     results = []
 
-    alpha_grid = [0.001, 0.01, 0.1]
-    l1_grid = [0.2, 0.5, 0.8]
+    alpha_grid = [0.001, 0.01, 0.1] if use_elasticnet else [0.0]
+    l1_grid = [0.2, 0.5, 0.8] if use_elasticnet else [0.0]
 
     # Global set of geos that are part of ANY treatment to exclude from ALL control pools
     all_treatment_geos = set(fixed_treatment) if fixed_treatment is not None else set()
@@ -87,21 +89,24 @@ def find_best_geo_clusters(
 
             for a in alpha_grid:
                 for l1 in l1_grid:
-                    model = ElasticNet(alpha=a, l1_ratio=l1, max_iter=10000)
-                    model.fit(X_scaled, y)
+                    if use_elasticnet:
+                        model = ElasticNet(alpha=a, l1_ratio=l1, max_iter=10000)
+                        model.fit(X_scaled, y)
 
-                    coefs = model.coef_
-                    # Filter controls with non-negative coefficients (aligns better with synthetic control)
-                    selected_controls = [
-                        control_pool[i]
-                        for i in range(len(control_pool))
-                        if coefs[i] > 0
-                    ]
+                        coefs = model.coef_
+                        # Filter controls with non-negative coefficients (aligns better with synthetic control)
+                        selected_controls = [
+                            control_pool[i]
+                            for i in range(len(control_pool))
+                            if coefs[i] > 0
+                        ]
 
-                    if len(selected_controls) == 0:
-                        # Fallback to absolute value if everything is zero/negative
-                        idx_max = np.argmax(np.abs(coefs))
-                        selected_controls = [control_pool[idx_max]]
+                        if len(selected_controls) == 0:
+                            # Fallback to absolute value if everything is zero/negative
+                            idx_max = np.argmax(np.abs(coefs))
+                            selected_controls = [control_pool[idx_max]]
+                    else:
+                        selected_controls = control_pool
 
                     # Prune zero-weight controls using True Synthetic Optimization
                     final_weights = []
@@ -144,14 +149,21 @@ def find_best_geo_clusters(
                         final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
 
                     X_selected = df_transformed[final_controls].values
-                    X_selected_scaled, _ = scale_data(X_selected)
 
-                    # Re-fit only on selected controls to get the final score
-                    model.fit(X_selected_scaled, y)
-                    y_pred = model.predict(X_selected_scaled)
+                    if use_elasticnet:
+                        X_selected_scaled, _ = scale_data(X_selected)
+                        # Re-fit only on selected controls to get the final score
+                        model.fit(X_selected_scaled, y)
+                        y_pred = model.predict(X_selected_scaled)
+                    else:
+                        # Pure SCM: Matrix multiply raw transformed values by the CVXPY weights
+                        weight_array = np.array(final_weights)
+                        y_pred = X_selected @ weight_array
+                        
                     residual = y - y_pred
 
                     std_residual = float(np.std(residual))
+                    rmspe = float(np.sqrt(np.mean(residual**2)))
                     
                     # Handle zero variance to avoid RuntimeWarnings in corrcoef
                     if np.std(y) > 0 and np.std(y_pred) > 0:
@@ -164,6 +176,7 @@ def find_best_geo_clusters(
                         "control": final_controls,
                         "control_weights": final_weights,
                         "std_residual": std_residual,
+                        "rmspe": rmspe,
                         "correlation": corr,
                         "synthetic_error_ratio": std_residual / (corr + 1e-6),
                         "n_controls": len(selected_controls),
@@ -186,7 +199,10 @@ def find_best_geo_clusters(
         raise ValueError("No valid combinations found.")
 
     # Sort results to find the best overall
-    results = sorted(results, key=lambda x: x["synthetic_error_ratio"])
+    if use_elasticnet:
+        results = sorted(results, key=lambda x: x["synthetic_error_ratio"])
+    else:
+        results = sorted(results, key=lambda x: x["rmspe"])
     
     # NEW: Return all evaluated combinations as clusters
     # This ensures that each fixed treatment gets its own cluster with unique metrics.
@@ -198,6 +214,7 @@ def find_best_geo_clusters(
             "control_weights": res["control_weights"],
             "correlation": res["correlation"],
             "std_residual": res["std_residual"],
+            "rmspe": res["rmspe"],
             "synthetic_error_ratio": res["synthetic_error_ratio"],
             "n_controls": res["n_controls"],
             "alpha": res["alpha"],
@@ -230,18 +247,20 @@ def find_best_geo_clusters(
         
         for i, c in enumerate(display_clusters):
             treatment_str = ", ".join(c['treatment'])
-            print(f"\n{label_prefix} {i} | Treatment: [{treatment_str}] | Correlation: {c['correlation']:.4f} | Std Residual: {c['std_residual']:.4f} | Synthetic Error Ratio: {c['synthetic_error_ratio']:.4f}")
+            print(f"\n{label_prefix} {i} | Treatment: [{treatment_str}] | Correlation: {c['correlation']:.4f} | RMSPE: {c['rmspe']:.4f} | Std Residual: {c['std_residual']:.4f} | Synthetic Error Ratio: {c['synthetic_error_ratio']:.4f}")
             print("-" * 60)
             
             controls_with_weights = list(zip(c['control'], c.get('control_weights', [])))
             sorted_controls = sorted(controls_with_weights, key=lambda x: x[1], reverse=True)
-            donor_strings = [f"{geo} ({w:.2%})" for geo, w in sorted_controls]
+            # Use 3 decimal places between 0 and 1 instead of %
+            donor_strings = [f"{geo} ({w:.3f})" for geo, w in sorted_controls]
             
             print("Donor Pool:")
             # Display horizontally in a tabular grid (4 items per row)
             for j in range(0, len(donor_strings), 4):
                 chunk = donor_strings[j:j+4]
-                row_str = "".join(f"{item:<20}" for item in chunk)
+                # Join with | separators to make an actual clean grid
+                row_str = " | ".join(f"{item:<16}" for item in chunk)
                 print("  " + row_str)
                 
         print("\n" + "="*60)
