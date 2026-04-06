@@ -1,6 +1,6 @@
 # `reallift.pipelines.geo_pipeline.run_geo_experiment`
 
-Na biblioteca RealLift, a função `run_geo_experiment` é a principal *pipeline* analítica de ponta-a-ponta para o cálculo de incrementalidade. Ela centraliza todas as etapas necessárias para consolidar o resultado de um teste A/B Geográfico **após (ou durante) a intervenção**.
+Na biblioteca RealLift, a função `run_geo_experiment` é a principal *pipeline* analítica de ponta-a-ponta. Ela centraliza todas as etapas necessárias para consolidar o resultado de um teste A/B Geográfico **após (ou durante) a intervenção**.
 
 ## Assinatura
 
@@ -9,51 +9,58 @@ def run_geo_experiment(
     filepath: str,
     date_col: str,
     treatment_start_date: str,
+    treatment_end_date: str = None,
+    doe: dict = None,
+    scenario: int = None,
+    start_date: str = None,
+    end_date: str = None,
     geos: list = None,
     n_treatment: int = 1,
     fixed_treatment: list = None,
-    mde: float = 0.01,
-    max_days: list = [21, 60],
-    n_folds: int = 1,
+    mde: float = 0.015,
+    experiment_days: int | list = [21, 60],
+    n_folds: int = 5,
     random_state: int = None,
     plot: bool = True,
     verbose: bool = True
 ) -> dict
 ```
 
-## Arquitetura da Pipeline
+## Integração com Design of Experiments (DoE)
 
-Diferente de métodos isolados, a `run_geo_experiment` orquestra o encadeamento de 6 submódulos matemáticos sequenciais para cada cluster (grupo cidade controle vs cidade tratamento) encontrado:
+Uma das maiores vantagens da `run_geo_experiment` é a capacidade de ler diretamente o objeto retornado pela função `design_of_experiments`. 
 
-1. **Descoberta de Clusters (`find_best_geo_clusters`)**: Acha os *matches* perfeitos de controle usando dados estritamente anteriores a `treatment_start_date`.
-2. **Validação Cruzada Temporal (`validate_geo_groups`)**: Roda *Time Series Cross-Validation* para atestar a robustez fora da amostra (OOF R2 e MAPE).
-3. **Poder e Duração (`estimate_duration`)**: Calcula o retroceder estatístico para atestar se a curva tem poder para encontrar o Efeito Mínimo Detectável (MDE) desejado.
-4. **Controle Sintético Estrutural (`run_synthetic_control`)**: Projeta o preditor contrafactual do período de teste cruzando as estimativas otimizadas com os dados pós-tratamento para auferir o Impacto Real Absoluto e Relativo.
-5. **Testes de Placebo em In-Space (`run_placebo_tests`)**: Realiza re-amostragens recursivas atribuindo intervenções faltas às cidades de controle para mapear p-valores empíricos e a significância formal geométrica.
-6. **Diagnósticos Visuais (`plot_*`)**: Compila renderizações matemáticas baseadas no `matplotlib` para reportar publicamente as predições de efeito na série.
+- **`doe`**: Se você passar o dicionário retornado pelo DoE, a pipeline irá ignorar os parâmetros `geos`, `n_treatment` e `fixed_treatment`, utilizando exatamente os agrupamentos validados no planejamento.
+- **`scenario`**: Índice do cenário escolhido (ex: 1 para 10% de tratamento, 2 para 20%, etc.).
 
-## Parâmetros Principais
+## Janelas de Análise
 
-- **`treatment_start_date`** *(str)*: Recorte crucial na base `YYYY-MM-DD`. Divide os dados usados em *Treinamento de Otimização* (pré-start) e *Avaliação de Lift* (pós-start).
-- **`mde`** *(float, default=0.01)*: Minimum Detectable Effect (Lift esperado). Ex: `0.01` equivale a estimar 1% de deslocamento de *baseline* para validar *Power*.
-- **`max_days`** *(int/list)*: O teto de tempo que o teste pode durar comercialmente para a análise de *Power*.
-- **`n_folds`** *(int)*: Quantas janelas deslizantes avaliar durante a checagem cruzada da acurácia retroativa do Sintético.
+- **`treatment_start_date`**: Data exata em que a campanha começou. Divide o mundo em "Treino" e "Teste".
+- **`treatment_end_date`**: (Novo) Se você quiser analisar apenas um pedaço do período pós-intervenção (ex: os primeiros 14 dias de uma campanha que ainda está rodando), utilize este parâmetro para fechar a janela de Lift.
+
+## Etapas da Pipeline
+
+1. **Descoberta/Recuperação de Clusters**: Recupera do DoE ou descobre via ElasticNet os melhores controles sintéticos.
+2. **Validação Cruzada (`validate_geo_clusters`)**: Atesta a robustez histórica das séries.
+3. **Poder Estatístico (`estimate_duration`)**: Valida se o teste tem fôlego para detectar o MDE.
+4. **Controle Sintético (`run_synthetic_control`)**: Calcula o Lift Absoluto e Percentual com intervalos de confiança via **Bootstrap**.
+5. **Placebo Robusto (`run_placebo_tests`)**: Aplica a metodologia de **Razão MSPE** para garantir que o efeito é único da região tratada.
+6. **Diagnósticos Visuais**: Renderiza gráficos de séries temporais, lift acumulado e distribuição de placebo.
 
 ## Retorno (*Output*)
 
-A função compila um rico log formatado no STDOUT sumarizando as tabelas do Experimento e devolve a hierarquia integral dos metadados:
-
 ```python
 {
-    "summary": {"clusters": [...]},  # Metadados globais da Otimização Inicial
+    "clusters": [...],       # Agrupamentos utilizados
     "results": [
         {
-            "cluster": {...},       # Composição (Tratamento vs Controles selecionados)
-            "validation": {...},    # Métricas CV (R2 Out-of-Fold, MAPE)
-            "duration": {...},      # Estatísticas de MDE, Poder alcançado
-            "synthetic": {...},     # O delta central: lift_total_absoluto, limites do bootstrap
-            "placebo": {...}        # Resultados de p-value das simulações falsas
+            "cluster": {...},
+            "validation": {...},
+            "duration": {...},
+            "synthetic": {...},  # Resultados de Lift e MSPE
+            "placebo": {...}    # p-valor empírico robusto
         }
-    ]
+    ],
+    "consolidated": {...}    # Visão agregada de todos os clusters
 }
 ```

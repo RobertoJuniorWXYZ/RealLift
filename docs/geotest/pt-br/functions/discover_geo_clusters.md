@@ -1,19 +1,23 @@
-# `reallift.geo.split.find_best_geo_clusters`
+# `reallift.geo.discovery.discover_geo_clusters`
 
-Na biblioteca RealLift, a função `find_best_geo_clusters` é o motor principal para o design experimental de testes incrementais baseados em geografia (Geo Experiments). Sua finalidade é prever e identificar a combinação ótima de sub-regiões de controle para formar um **Controle Sintético** de alta correlação e baixo erro estocástico em relação a uma região de tratamento alvo, **antes do período da intervenção.**
+Na biblioteca RealLift, a função `discover_geo_clusters` é o motor principal para o design experimental de testes incrementais baseados em geografia (Geo Experiments). Sua finalidade é prever e identificar a combinação ótima de sub-regiões de controle para formar um **Controle Sintético** de alta correlação e baixo erro estocástico em relação a uma região de tratamento alvo, **antes do período da intervenção.**
 
 ## Assinatura
 
 ```python
-def find_best_geo_clusters(
+def discover_geo_clusters(
     filepath: str,
     date_col: str,
     geos: list = None,
     n_treatment: int = 3,
     fixed_treatment: list = None,
-    treatment_start_date: str = None,
-    verbose: bool = True
-) -> list[dict]
+    start_date: str = None,
+    end_date: str = None,
+    use_elasticnet: bool = True,
+    search_mode: str = "auto",
+    verbose: bool = True,
+    show_results: bool = True
+) -> list
 ```
 
 ## Como Funciona: Passo a Passo Intuitivo
@@ -103,14 +107,14 @@ Retorna lista de dicionários mapeados com a melhor parametrização combinada. 
 ## Exemplo de Uso
 
 ```python
-from reallift.geo.split import find_best_geo_clusters
+from reallift.geo.discovery import discover_geo_clusters
 
 # Exemplo Clássico: Forçando agrupamentos de controle para unidades de Campanha Ativas.
-melhores_clusters = find_best_geo_clusters(
+melhores_clusters = discover_geo_clusters(
     filepath="base_historica_vendas.csv",
     date_col="data_faturamento",
     fixed_treatment=["sao_paulo", "rio_de_janeiro"], 
-    treatment_start_date="2026-04-10"
+    start_date="2026-01-01"
 )
 
 for sub_testes in melhores_clusters:

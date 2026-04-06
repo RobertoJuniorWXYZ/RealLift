@@ -19,23 +19,25 @@ def run_placebo_tests(
 ) -> dict
 ```
 
-## Mecânica Estocástica de Inversão de Espaços Falsos
+## Mecânica de Razão MSPE (Post/Pre)
 
-A execução dessa preposição instiga rigorosamente a emulação de permuta matemática chamada *Leave-One-Out Placebo Refutation*:
-1. Um for-loop entra sistematicamente na base matricial iterando o balde das populações classificáveis de Controle genuínas não-testadas do seu GeoLift.
-2. Promove-se artificialmente e momentaneamente a coroa de "Cidade Tratada ($Y$ alvo falsa)" para a $N_{ésima}$ cidade de controle do grid, repulando as coadjuvantes que sobraram nos laços para modelarem a contrafactual de falso-controle para ela.
-3. Roda internamente um bloco cego assíncrono hiper-custoso da mesma matriz `run_synthetic_control`. Como a cidade placebo não sofreu nenhuma campanha real subjacente em `treatment_start_date`, espera-se logicamente que a margem delta residual (o pseudo-*Lift* captado) seja extremamente tendenciosa ao 0 absoluto.
+Em vez de comparar apenas o Lift absoluto, o RealLift adota a metodologia de **Razão MSPE (Mean Squared Prediction Error)**, conforme proposto por Abadie et al. (2010). Esta abordagem é superior pois normaliza o erro do período de intervenção pelo erro de ajuste histórico (pré-teste) de cada geo:
 
-### Densidade Probabilística (*Empirical p-value formulation*)
-Ao final da estafante malha de inferência iterada randômica no teto limite tolerável `n_placebos`, junta-se as flutuações amostrais falsas num *Array* $|L_{placebo}|$ em formato não-sinalizado absoluto.
-Deriva-se então a proeminência exata com intersecção ao seu verdadeiro e único Lift factual de projeto capturado ($|L_{observed}|$) pela equação baseada em simulação Monte Carlo restritiva:
+1.  **Iteração Placebo**: Para cada geo no pool de controle, o modelo tenta criar um controle sintético para ela, tratando-a como se fosse o alvo do experimento.
+2.  **Cálculo da Razão**: Para cada teste (incluindo o real), calculamos:
+    $$
+    Ratio = \frac{MSPE_{Post}}{MSPE_{Pre}}
+    $$
+3.  **Vantagem**: Se uma cidade é naturalmente ruidosa e o modelo não encaixou bem no pré-teste ($MSPE_{Pre}$ alto), um desvio alto no pós-teste não será considerado tão "anormal". Por outro lado, se o encaixe foi perfeito e houve um desvio súbito após a data da campanha, a Razão será altíssima, indicando um efeito único.
+
+### Densidade Probabilística (Empirical p-value formulation)
+
+O $p_{value}$ agora representa a probabilidade de encontrarmos uma Razão MSPE tão alta quanto a observada no geo de tratamento original por puro acaso:
 
 $$
-P_{Value\_Empirico} = \frac{\sum_{i=1}^{P} \mathbf{I} \big(|L_{placebo\_i}| \ge |L_{observed}|\big)}{P}
+P_{Value\_Empirico} = \frac{\sum_{i=1}^{P} \mathbf{I} \big(Ratio_{placebo\_i} \ge Ratio_{observed}\big)}{P}
 $$
 
-*(Onde $\mathbf{I}(\cdot)$ assume representatividade modular unitária 1 de indicador relacional caso falhe localmente).*
+*(Onde $\mathbf{I}(\cdot)$ assume valor 1 caso a condição seja verdadeira).*
 
-Quanto mais contrafactuais sintéticos aleatórios cruzarem sem motivos o altíssimo valor financeiro e numérico provocado no Lift verdadeiro da cidade-alvo real sua, maior se agitará o $p_{value}$, destitíndo estatisticamente a exclusividade causal e provando a quebra formal do rigor A/B.
-
-Resultados menores que logarítimo estrito $\alpha = 0.1$ acenderão métricas de sucesso visual (`✔ High confidence:`), corroborando seu lucro numérico gerado como altamente único e impermeável às tendências flutuantes de variáveis inorgânicas naturais no ambiente de *hold-outs*.
+Resultados de $p \le 0.10$ acenderão métricas de sucesso visual (`✔ High confidence:`), corroborando que a anomalia gerada pela sua campanha é estatisticamente rara e não explicável pelo ruído natural das outras regiões.

@@ -8,7 +8,12 @@ def run_placebo_tests(
     date_col,
     control_geos,
     treatment_start_date,
-    observed_lift,
+    observed_pre_mspe,
+    observed_post_mspe,
+    observed_lift=None,
+    treatment_end_date=None,
+    start_date=None,
+    end_date=None,
     n_placebos=10,
     random_state=None,
     cluster_idx=None,
@@ -16,25 +21,18 @@ def run_placebo_tests(
     verbose=True
 ) -> dict:
     """
-    Run placebo tests by treating control geographies as treated.
+    Run placebo tests comparing the MSPE Ratio (Post/Pre) of the observed
+    treatment against those of control geographies treated as placebos.
 
-    Parameters:
-        filepath (str): Path to CSV file.
-        date_col (str): Date column name.
-        control_geos (list): Control geographies.
-        treatment_start_date (str): YYYY-MM-DD Treatment start date.
-        observed_lift (float): The actual observed lift absolute to compare against.
-        n_placebos (int): Maximum number of placebo tests to run randomly.
-        random_state (int or np.random.Generator): Random state for reproducibility.
-        cluster_idx (int or str): Optional cluster index for logging traceability.
-        plot (bool): Whether to plot the two-sided placebo distribution.
-        verbose (bool): Whether to print logging results.
-
-    Returns:
-        dict: Placebo test results.
+    Methodology: Abadie et al. (2010), comparing the distribution of the 
+    ratio of post-intervention MSPE to pre-intervention MSPE.
     """
-    placebo_lifts = []
+    placebo_ratios = []
+    
+    # Calculate Observed Ratio
+    observed_ratio = observed_post_mspe / observed_pre_mspe if observed_pre_mspe > 0 else 0
 
+    # Execute Placebo Runs
     for i in range(min(n_placebos, len(control_geos))):
         placebo_geo = control_geos[i]
         placebo_controls = [g for g in control_geos if g != placebo_geo]
@@ -46,56 +44,59 @@ def run_placebo_tests(
                 treatment_geo=placebo_geo,
                 control_geos=placebo_controls,
                 treatment_start_date=treatment_start_date,
+                treatment_end_date=treatment_end_date,
+                start_date=start_date,
+                end_date=end_date,
                 random_state=random_state,
                 plot=False,
                 verbose=False
             )
-            placebo_lifts.append(result["lift_mean_abs"])
+            # Use MSPE Ratio: Post-MSPE / Pre-MSPE
+            p_ratio = result["post_mspe"] / result["pre_mspe"] if result["pre_mspe"] > 0 else 0
+            placebo_ratios.append(p_ratio)
         except:
             continue
 
-    p_value = np.mean(np.abs(placebo_lifts) >= np.abs(observed_lift))
+    if len(placebo_ratios) == 0:
+        p_value = 1.0
+    else:
+        # P-value is the proportion of placebo ratios greater than or equal to the observed ratio
+        p_value = np.mean(np.array(placebo_ratios) >= observed_ratio)
 
     if verbose:
         header = "=== GEO PLACEBO TESTS ==="
         if cluster_idx is not None:
             header = f"=== GEO PLACEBO TESTS (Cluster {cluster_idx}) ==="
         print(f"\n{header}")
-        print(f"Number of placebo tests: {len(placebo_lifts)}")
-        print(f"Average placebo lift (noise): {np.mean(placebo_lifts):.4f}")
-        print(f"Observed treatment lift: {observed_lift:.4f}")
+        print(f"Number of placebo tests: {len(placebo_ratios)}")
+        print(f"Observed MSPE Ratio: {observed_ratio:.4f}")
         print(f"P-value (placebo): {p_value:.4f}")
         
-        if p_value < 0.1:
-            direction = "higher" if observed_lift > 0 else "lower"
-            print(f"✔ High confidence: Observed lift is significantly {direction} than random placebos.")
+        if p_value <= 0.10:
+            print(f"✔ High confidence: Observed deviation is significantly higher than random noise (MSPE Ratio).")
         else:
-            print("✖ Warning: Observed lift is within the range of random noise (high p-value).")
+            print("✖ Warning: Observed deviation is within the range of random noise (high p-value).")
 
-    if plot and len(placebo_lifts) > 0:
-        plot_placebo_tests(placebo_lifts, observed_lift)
+    if plot and len(placebo_ratios) > 0:
+        plot_placebo_tests(placebo_ratios, observed_ratio)
 
     return {
-        "placebo_lifts": placebo_lifts,
-        "observed_lift": observed_lift,
+        "placebo_ratios": placebo_ratios,
+        "observed_ratio": observed_ratio,
         "p_value": p_value
     }
 
-def plot_placebo_tests(placebo_lifts, observed_lift):
+def plot_placebo_tests(placebo_ratios, observed_ratio):
     """
-    Generate plot for placebo tests.
+    Generate plot for placebo tests using MSPE Ratio.
     """
     plt.figure(figsize=(10, 6))
-    plt.hist(placebo_lifts, color='skyblue', edgecolor='black', alpha=0.7, label='Placebo Lifts (Noise)')
-    plt.axvline(observed_lift, color='red', linestyle='--', linewidth=2, label=f'Observed Lift ({observed_lift:.2f})')
+    plt.hist(placebo_ratios, color='skyblue', edgecolor='black', alpha=0.7, label='Placebo MSPE Ratios')
+    plt.axvline(observed_ratio, color='red', linestyle='--', linewidth=2, label=f'Observed Ratio ({observed_ratio:.2f})')
     
-    # Add a symmetrical line for two-sided visualization if lift is significant
-    if observed_lift != 0:
-        plt.axvline(-observed_lift, color='orange', linestyle=':', linewidth=1, label='Symmetrical Threshold')
-        
-    plt.title('Placebo Tests Distribution (Two-sided)')
-    plt.xlabel('Estimated Lift (Absolute)')
+    plt.title('Placebo Tests Distribution (MSPE Ratio: Post/Pre)')
+    plt.xlabel('MSPE Ratio (Post-MSPE / Pre-MSPE)')
     plt.ylabel('Frequency')
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.show()
+    plt.show()

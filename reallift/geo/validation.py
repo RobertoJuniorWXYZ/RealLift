@@ -7,11 +7,13 @@ from sklearn.model_selection import TimeSeriesSplit
 from reallift.utils.metrics import mape, wape, compute_r2
 from reallift.config.defaults import DEFAULT_TRAIN_TEST_SPLIT
 
-def validate_geo_groups(
+def validate_geo_clusters(
     filepath,
     date_col,
     splits,
     treatment_start_date=None,
+    start_date=None,
+    end_date=None,
     train_test_split=DEFAULT_TRAIN_TEST_SPLIT,
     n_folds=1,
     plot=True,
@@ -27,7 +29,9 @@ def validate_geo_groups(
         filepath (str): Path to CSV file.
         date_col (str): Date column name.
         splits (dict or list): Split results.
-        treatment_start_date (str): Treatment start date. Data from this date onwards will be excluded from the training metric calculation.
+        treatment_start_date (str): Treatment start date for CV split point.
+        start_date (str): YYYY-MM-DD date when history begins (optional).
+        end_date (str): YYYY-MM-DD date when history ends (optional).
         train_test_split (float): Train/test split ratio (used if n_folds=1).
         n_folds (int): Number of folds for Time Series Cross-Validation evaluating the Convex Synthetic constraint. If 1, uses static temporal split.
         plot (bool): Whether to display a validation prediction plot per cluster.
@@ -49,8 +53,13 @@ def validate_geo_groups(
     )
     df = df.dropna(subset=[date_col])
 
-    # Filter to pre-treatment period if start date is provided
-    # Excludes the treatment start date and everything after
+    # 1. Period Filtering (General Window)
+    if start_date is not None:
+        df = df[df[date_col] >= pd.to_datetime(start_date)]
+    if end_date is not None:
+        df = df[df[date_col] <= pd.to_datetime(end_date)]
+
+    # 2. Extract context for CV split (Pre-treatment only)
     if treatment_start_date is not None:
         df = df[df[date_col] < pd.to_datetime(treatment_start_date)]
     

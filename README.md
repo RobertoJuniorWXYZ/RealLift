@@ -4,101 +4,83 @@
   <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/logo.png" width="200" style="border-radius: 10px;" alt="RealLift Logo">
 </p>
 
-**Causal Inference Library for Lift Measurement & Design of Experiments**
+**Causal Inference Framework for Geo Experiments & Marketing Science**
 
-RealLift is an advanced Python library engineered to assist data scientists and analysts in reliably measuring the true incremental impact of interventions through rigorous causal inference methodologies, such as **GeoLift**, **Synthetic Control Estimation**, and **Placebo Testing**.
+**RealLift** is an advanced Python library engineered to measure the true incremental impact (Lift) of marketing interventions through rigorous Causal Inference, Synthetic Control methodologies, and Robust Significance Testing.
 
 ---
 
-## Capabilities
+## Framework Pillars
 
-- **Design of Experiments (Geo-Splitting)**: Algorithmically identifies structural clusters and mathematically selects the optimal treatment and control regions based on ElasticNet feature selection and convex proximity matrices.
-- **Synthetic Control Measurement**: Formulates robust counterfactual interventions by mapping temporal correlations across a predefined array of donor regions via constrained Convex Optimization (`cvxpy`).
-- **Time Series Cross-Validation**: Ensures predictive validity of counterfactuals via Historical Simulation, isolating definitive Out-Of-Fold (OOF) R² and MAPE limits prior to experiments.
-- **Duration & Statistical Power**: Estimates predictive power dynamically over time streams to establish strict Minimum Detectable Effect (MDE) bounds before test implementation.
-- **Significance & Placebo Testing**: Empirically defends the analytical conclusions through non-parametric bootstrap sampling and randomized spatial placebo permutations to comprehensively evaluate the null hypothesis.
+RealLift is built upon three layers of defense against noise and volatility:
+
+1.  **Auditable Planning (Design of Experiments)**: Algorithmically identifies the optimal geographic clusters and projects statistical power (MDE) prior to any campaign investment.
+2.  **Causal Inference (Synthetic Control)**: Formulates robust counterfactuals via Convex Optimization with Intercept, ensuring behavioral alignment even across differing baseline levels.
+3.  **Confidence Validation (Placebo & Significance)**: Defends analytical conclusions through permutation tests based on the **MSPE Ratio** and non-parametric **Bootstrap** confidence intervals.
 
 ---
 
 ## Installation
 
-RealLift is securely distributed through **PyPI** for production environments:
-
 ```bash
 pip install reallift
-```
-
-Alternatively, obtain the latest development snapshot directly from the source repository:
-
-```bash
-pip install git+https://github.com/RobertoJuniorWXYZ/RealLift.git
 ```
 
 ---
 
 ## Quick Start Guide
 
-### 1. Requirements & Design (Pre-Test Phase)
-Before executing a field intervention, analyze the underlying baseline correlation to discover optimal clusters and project the duration strictly necessary to capture a target Minimum Detectable Effect (MDE).
+### 1. Planning (Pre-Test Phase)
+Use the DoE pipeline to project the duration strictly necessary to capture a target Minimum Detectable Effect (MDE).
 
 ```python
-from reallift import run_geo_requirements
+from reallift.pipelines import design_of_experiments
 
-# Identify structural blocks and validate exposure durations
-summary = run_geo_requirements(
+# Project requirements and identify optimal clusters
+doe_result = design_of_experiments(
     filepath="historical_data.csv",
     date_col="date",
-    n_treatment=1,
-    mde=0.015,
-    max_days=[21, 60],
-    n_folds=5,
-    verbose=True
+    pct_treatment=0.10,      # Test a scenario with 10% of the market treated
+    mde=0.015,               # Target 1.5% incremental lift
+    experiment_days=[21, 60] # Evaluation window between 21 and 60 days
 )
 ```
 
-### 2. Intervention Measurement (Post-Test Phase)
-Following the completion of an intervention, apply the algorithmic pipeline encompassing validation constraint-checking, Synthetic Control extraction, and empirical Placebo diagnostics.
+### 2. Impact Analysis (Post-Test Phase)
+Execute the complete analytical pipeline after or during the intervention.
 
 ```python
-from reallift import run_geo_experiment
+from reallift.pipelines import run_geo_experiment
 
-# Execute the complete analytical pipeline
+# Complete end-to-end analytical pipeline
 result = run_geo_experiment(
     filepath="experiment_data.csv",
     date_col="date",
     treatment_start_date="2025-05-01",
-    n_treatment=1,
-    mde=0.015,
-    max_days=[21, 60],
-    n_folds=5,
-    random_state=42,
-    verbose=True
+    doe=doe_result,          # Inherit validated clusters from DoE
+    scenario=0               # Use the 10% treatment scenario
 )
 
-# Extract total absolute impact estimates
-print(f"Incremental Lift (abs): {result['results'][0]['synthetic']['lift_total']:.2f}")
+# Extract total documented incremental impact
+print(f"Total Cumulative Lift: {result['results'][0]['synthetic']['lift_total']:.2f}")
 ```
 
 ---
 
-## Examples & Application
+## Technical Differentiators
 
-For a comprehensive methodological demonstration concerning correlation assumptions, feature engineering operations, and diagnostic evaluation limits, refer to the Jupyter notebooks mapped under the `examples/geotests/` directory within the primary repository.
+- **SER Engine (Synthetic Error Ratio)**: Proactive volatility filtering during the design phase to eliminate "Zombie Controls."
+- **Convex Intercept**: Intelligent baseline shift absorption that preserves the interpretability of synthetic weights ($\sum w = 1$).
+- **MSPE Ratio Strategy**: A placebo methodology resilient to the natural variance of high-frequency volatile markets.
+- **Operational Freedom**: Aggressive donor curatorship via ElasticNet that often frees up to 50% of geographic regions for other commercial operations.
 
 ---
 
 ## Systems & Dependencies
 
-- **Platform Target**: Python 3.8+
-- **Mathematics**: `cvxpy` (Core algorithmic solver for constraints)
-- **Data Engineering**: `pandas`, `numpy`, `scikit-learn`, `scipy`
-- **Plotting Engines**: `matplotlib`, `seaborn`
-
----
-
-## License
-
-MIT License. Navigate to the `LICENSE` file for full disclosure.
+- **Mathematics**: `cvxpy`, `scipy`, `numpy`
+- **Data Engineering**: `pandas`, `scikit-learn`
+- **Visualization**: `matplotlib`
 
 ---
 

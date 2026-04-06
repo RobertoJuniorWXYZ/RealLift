@@ -1,15 +1,17 @@
-# `reallift.geo.validation.validate_geo_groups`
+# `reallift.geo.validation.validate_geo_clusters`
 
-A função `validate_geo_groups` é o motor de auditoria de *Overfitting* estático ou temporal para os grupos de geografias candidatas. Sua finalidade é assegurar que o Controle Sintético escolhido não decorre simplesmente de um ajuste espúrio perfeito aos ruídos passados, mas que ele possua uma capacidade preditiva genuína *Out-of-Sample*.
+A função `validate_geo_clusters` é o motor de auditoria de *Overfitting* estático ou temporal para os grupos de geografias candidatas. Sua finalidade é assegurar que o Controle Sintético escolhido não decorre simplesmente de um ajuste espúrio perfeito aos ruídos passados, mas que ele possua uma capacidade preditiva genuína *Out-of-Sample*.
 
 ## Assinatura
 
 ```python
-def validate_geo_groups(
+def validate_geo_clusters(
     filepath: str,
     date_col: str,
     splits: list,
     treatment_start_date: str = None,
+    start_date: str = None,
+    end_date: str = None,
     train_test_split: float = 0.8,
     n_folds: int = 1,
     plot: bool = True,

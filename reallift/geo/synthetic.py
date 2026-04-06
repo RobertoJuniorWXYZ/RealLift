@@ -11,6 +11,9 @@ def run_synthetic_control(
     treatment_geo,
     control_geos,
     treatment_start_date,
+    treatment_end_date=None,
+    start_date=None,
+    end_date=None,
     random_state=None,
     cluster_idx=None,
     plot=True,
@@ -25,6 +28,9 @@ def run_synthetic_control(
         treatment_geo (str or list): Treatment geography or list of geographies.
         control_geos (list): Control geographies.
         treatment_start_date (str): Treatment start date, separating pre-test and post-test periods.
+        treatment_end_date (str): Treatment end date (analysis window end).
+        start_date (str): YYYY-MM-DD date when analysis begins (optional).
+        end_date (str): YYYY-MM-DD date when analysis ends (optional).
         random_state (int or np.random.Generator): Random state for reproducible permutations.
         cluster_idx (int or str): Optional cluster index for logging traceability.
         plot (bool): Whether to plot the baseline graph.
@@ -36,15 +42,30 @@ def run_synthetic_control(
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
     df = df.dropna(subset=[date_col])
+
+    # Period Filtering (Global Window)
+    if start_date is not None:
+        df = df[df[date_col] >= pd.to_datetime(start_date)]
+    if end_date is not None:
+        df = df[df[date_col] <= pd.to_datetime(end_date)]
+
     df = df.sort_values(date_col).reset_index(drop=True)
 
+    # 1. Determine causal split index (Pre vs Post)
     post_data = df[df[date_col] >= pd.to_datetime(treatment_start_date)]
     is_pre_only = len(post_data) == 0
 
     if is_pre_only:
         treatment_idx = len(df)
+        treatment_end_idx = len(df)
     else:
         treatment_idx = post_data.index[0]
+        # Determine treatment end index for EFFECT calculation
+        if treatment_end_date:
+            end_mask = df[date_col] <= pd.to_datetime(treatment_end_date)
+            treatment_end_idx = df[end_mask].index[-1] + 1 if any(end_mask) else len(df)
+        else:
+            treatment_end_idx = len(df)
 
     if isinstance(treatment_geo, list):
         y = df[treatment_geo].mean(axis=1).values.astype(float)
@@ -87,6 +108,7 @@ def run_synthetic_control(
     pre_real = y[:treatment_idx]
     pre_synth = synthetic[:treatment_idx]
     pre_error = np.mean(np.abs(pre_real - pre_synth))
+    pre_mspe = np.mean((pre_real - pre_synth)**2)
 
     if is_pre_only:
         post_real = np.array([])
@@ -103,15 +125,17 @@ def run_synthetic_control(
             "ci_lower_abs": 0.0, "ci_upper_abs": 0.0,
             "ci_lower_total_abs": 0.0, "ci_upper_total_abs": 0.0
         }
+        post_mspe = 0.0
     else:
-        post_real = y[treatment_idx:]
-        post_synth = synthetic[treatment_idx:]
+        post_real = y[treatment_idx : treatment_end_idx]
+        post_synth = synthetic[treatment_idx : treatment_end_idx]
         effect = post_real - post_synth
 
         lift_abs = effect.mean()
-        effect_pct = effect / post_synth
+        effect_pct = effect / post_synth if post_synth.sum() != 0 else np.zeros_like(effect)
         lift_pct = np.mean(effect_pct)
         lift_total = effect.sum()
+        post_mspe = np.mean(effect**2)
 
         # Bootstrap
         boot_result = bootstrap_significance(effect, post_synth, random_state=random_state)
@@ -127,10 +151,10 @@ def run_synthetic_control(
                 print(f"{geo}: {w_val:.4f}")
 
         print("\nTreatment period:")
-        start_date = df[date_col].iloc[treatment_idx].strftime('%Y-%m-%d')
-        end_date = df[date_col].iloc[-1].strftime('%Y-%m-%d')
-        print(f"Start: {start_date}")
-        print(f"End: {end_date}")
+        start_date_str = df[date_col].iloc[treatment_idx].strftime('%Y-%m-%d')
+        end_date_str = df[date_col].iloc[treatment_end_idx - 1].strftime('%Y-%m-%d')
+        print(f"Start: {start_date_str}")
+        print(f"End: {end_date_str}")
         print(f"Duration: {len(effect)} days")
 
         print(f"\nMean lift (abs): {lift_abs:.2f}")
@@ -170,6 +194,9 @@ def run_synthetic_control(
         "weights": dict(zip(control_geos, weights)),
         "alpha": alpha_val,
         "pre_error": pre_error,
+        "pre_mspe": pre_mspe,
+        "post_mspe": post_mspe,
+        "mspe_ratio": post_mspe / pre_mspe if pre_mspe > 0 else 0,
         "lift_mean_abs": lift_abs,
         "lift_mean_pct": lift_pct,
         "lift_total": lift_total,
