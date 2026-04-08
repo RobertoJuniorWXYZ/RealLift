@@ -158,10 +158,19 @@ def _evaluate_combinations(df, geos, treatment_combinations, all_treatment_geos,
 
     results = []
 
+    # Ensure all_treatment_geos is a flat set of strings
+    clean_all_treatments = set()
+    if all_treatment_geos:
+        for t in all_treatment_geos:
+            if isinstance(t, list): clean_all_treatments.update([str(x).strip() for x in t])
+            else: clean_all_treatments.add(str(t).strip())
+
     for treatment_comb in iterator:
-        treatment_comb = list(treatment_comb)
-        forbidden_geos = set(treatment_comb).union(all_treatment_geos)
-        control_pool = [g for g in geos if g not in forbidden_geos]
+        treatment_comb = [str(x).strip() for x in list(treatment_comb)]
+        
+        # Isolation Core: Absolute ban on any treatment unit in the donor pool
+        forbidden_geos = set(treatment_comb).union(clean_all_treatments)
+        control_pool = [str(g).strip() for g in geos if str(g).strip() not in forbidden_geos]
 
         try:
             df_transformed = log_diff_transform(df, treatment_comb + control_pool)
@@ -207,9 +216,9 @@ def _evaluate_combinations(df, geos, treatment_combinations, all_treatment_geos,
                         X_norm_syn = X_syn / X_mean_syn
 
                         w_syn = cp.Variable(len(selected_controls))
-                        alpha_syn = cp.Variable()
-
-                        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn + alpha_syn)))
+                        
+                        # NO INTERCEPT in discovery for consistency with synthetic.py
+                        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn)))
                         cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
                         prob_syn = cp.Problem(obj_syn, cons_syn)
                         prob_syn.solve(solver=cp.SCS, verbose=False)

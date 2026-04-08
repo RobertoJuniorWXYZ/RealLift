@@ -116,4 +116,4 @@ def plot_placebo_tests(placebo_ratios, observed_ratio):
     plt.ylabel('Frequency')
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.show()
+    plt.show()

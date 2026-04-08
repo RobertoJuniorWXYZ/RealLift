@@ -80,17 +80,36 @@ def run_geo_experiment(
 
     # 2. Results storage
     results = []
+    
+    # 2.1 Identify global treatment set to enforce total isolation
+    global_treatments = set()
+    for c in clusters:
+        if isinstance(c["treatment"], list):
+            global_treatments.update(c["treatment"])
+        else:
+            global_treatments.add(c["treatment"])
 
     # 3. Process each cluster
     for i, cluster in enumerate(clusters):
+        # Enforce Isolation: Ensure no other treatment units are in this cluster's control pool
+        current_treatment = set(cluster["treatment"]) if isinstance(cluster["treatment"], list) else {cluster["treatment"]}
+        exclusive_controls = [g for g in cluster["control"] if g not in global_treatments or g in current_treatment]
+        # (Though current treatment shouldn't be in control anyway, this is a safety net)
+        
         if verbose:
             print(f"\n" + "-" * 50)
             print(f" ANALYZING CLUSTER {i} ".center(50, "-"))
             print("-" * 50)
             print(f"Treatment: {cluster['treatment']}")
-            print(f"Control: {cluster['control']}\n")
+            print(f"Final Exclusive Controls: {exclusive_controls}\n")
+            
+            # Warn if we had to remove contaminated donors
+            removed = [g for g in cluster["control"] if g in global_treatments and g not in current_treatment]
+            if removed:
+                print(f"⚠️  WARNING: Removed {len(removed)} contaminated donors from this cluster: {removed}")
 
         # 3.1 Get Validation and Duration metrics (Reuse from DoE or run fresh)
+        # ... (lines 94-131 unchanged)
         if doe is not None and scenario is not None:
             # Extract from DoE scenario
             cv_row = doe["scenarios"][scenario]["validation"].iloc[i]
@@ -120,9 +139,9 @@ def run_geo_experiment(
                 filepath=filepath,
                 date_col=date_col,
                 treatment_geo=cluster["treatment"],
-                control_geos=cluster["control"],
+                control_geos=exclusive_controls, # Use exclusive pool
                 start_date=start_date,
-                end_date=treatment_start_date, # Duration only looks at pre-period
+                end_date=treatment_start_date, 
                 mde=mde,
                 experiment_days=experiment_days,
                 cluster_idx=i,
@@ -138,7 +157,7 @@ def run_geo_experiment(
                 filepath=filepath,
                 date_col=date_col,
                 treatment_geo=cluster["treatment"],
-                control_geos=cluster["control"],
+                control_geos=exclusive_controls, # Use exclusive pool
                 treatment_start_date=treatment_start_date,
                 treatment_end_date=treatment_end_date,
                 start_date=start_date,
@@ -153,7 +172,7 @@ def run_geo_experiment(
                 filepath=filepath,
                 date_col=date_col,
                 treatment_geo=cluster["treatment"],
-                control_geos=cluster["control"],
+                control_geos=exclusive_controls, # Use exclusive pool
                 treatment_start_date=treatment_start_date,
                 treatment_end_date=treatment_end_date,
                 start_date=start_date,
@@ -648,35 +667,34 @@ def design_of_experiments(
                 # Sort descending by maximum reached holistic R²
                 all_evals.sort(key=lambda x: x["r2"], reverse=True)
                 
+                # Identify the intended treatment set for this scenario based on Matched DiD ranking
+                intended_treatment_pool = [item["candidate"] for item in all_evals[:n_treat]]
+                
                 locked_treatments = []
                 
-                # First pass: try to pick perfectly disjoint treatments (no treatment serves as donor to another)
+                # Selection Loop: pick candidates and ensure their donor pools are clean 
+                # from OTHER treatments in this specific scenario.
                 for item in all_evals:
                     if len(refined_clusters) >= n_treat: break
                     candidate = item["candidate"]
-                    donors = item["best"]["control"]
                     
-                    if candidate not in locked_treatments and not any(l in donors for l in locked_treatments):
-                        if verbose: print(f"    - Candidate: {candidate:<10} Selected (R² = {item['r2']:.4f}, Iters: {item['iters']})      ")
-                        refined_clusters.append(item)
-                        locked_treatments.append(candidate)
+                    if candidate in intended_treatment_pool:
+                        # PURIFY: Remove any other unit that belongs to the treatment pool from this candidate's donor set
+                        best_mod = item["best"].copy()
+                        others = [t for t in intended_treatment_pool if t != candidate]
                         
-                # Second pass: if quota not met due to overlaps, relax disjointness and just pick highest R²
-                if len(refined_clusters) < n_treat:
-                    for item in all_evals:
-                        if len(refined_clusters) >= n_treat: break
-                        candidate = item["candidate"]
-                        if candidate not in locked_treatments:
-                            best_cluster_mod = item["best"].copy()
-                            # Clean up controls so they don't include other locked treatments
-                            best_cluster_mod["control"] = [d for d in best_cluster_mod["control"] if d not in locked_treatments]
-                            best_cluster_mod["control_weights"] = [1.0/len(best_cluster_mod["control"])] * len(best_cluster_mod["control"]) if len(best_cluster_mod["control"]) > 0 else []
+                        clean_controls = [d for d in best_mod["control"] if d not in others]
+                        
+                        # Update weights to be uniform over the clean pool (DiD Standard)
+                        if len(clean_controls) > 0:
+                            best_mod["control"] = clean_controls
+                            best_mod["control_weights"] = [1.0/len(clean_controls)] * len(clean_controls)
                             
-                            item["best"] = best_cluster_mod
-                            if verbose: print(f"    - Candidate: {candidate:<10} Selected (R² = {item['r2']:.4f}, Iters: {item['iters']})      ")
+                            item["best"] = best_mod
+                            if verbose: print(f"    - Candidate: {candidate:<10} Selected (Cleaned, R² = {item['r2']:.4f})      ")
                             refined_clusters.append(item)
                             locked_treatments.append(candidate)
-                            
+                        
                 # Sort refined_clusters so final output is strict R2 order
                 refined_clusters.sort(key=lambda x: x["r2"], reverse=True)
                             
@@ -686,11 +704,18 @@ def design_of_experiments(
                 locked_treatments = []
                 fallback_queue = []
                 
+                # Global Isolation: identify all intended treatment units for this scenario
+                # These must be forbidden as donors for each other from the start
+                global_treatment_pool = set(global_ranking[:n_treat])
+                
                 for candidate in global_ranking:
                     if len(refined_clusters) >= n_treat:
                         break
                         
-                    available_geos = [g for g in geos if g not in locked_treatments]
+                    # Enforce strict isolation: Exclude ANY unit that is part of the intended treatment pool 
+                    # (except the candidate itself, which is handled by discover_geo_clusters)
+                    other_intended_treatments = global_treatment_pool - {candidate}
+                    available_geos = [g for g in geos if g not in locked_treatments and g not in other_intended_treatments]
                     
                     try:
                         candidate_eval = discover_geo_clusters(
@@ -700,7 +725,7 @@ def design_of_experiments(
                         )
                         current_cluster = candidate_eval[0].copy()
                     except Exception:
-                        if verbose: print("Failed discovery.")
+                        if verbose: print(f"    - Candidate: {candidate:<10} Failed discovery (check pool size).")
                         continue
                     
                     best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
@@ -907,9 +932,9 @@ def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, 
         X_norm_syn = X_syn / X_mean_syn
 
         w_syn = cp.Variable(len(controls))
-        alpha_syn = cp.Variable()
-
-        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn + alpha_syn)))
+        
+        # NO INTERCEPT in refinement to prevent leakage absorption
+        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn)))
         cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
         prob_syn = cp.Problem(obj_syn, cons_syn)
         
@@ -922,8 +947,10 @@ def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, 
                 w_vals = w_vals / sum_w
             new_weights = [float(w) for w in w_vals]
             
-            alpha_val = alpha_syn.value if alpha_syn.value is not None else 0.0
-            y_pred = (X_norm_syn @ np.array(new_weights) + alpha_val) * y_mean_syn
+            # NO INTERCEPT in refinement models
+            alpha_val = 0.0 
+            y_pred = (X_norm_syn @ np.array(new_weights)) * y_mean_syn
+            
             if np.std(y_syn) > 0 and np.std(y_pred) > 0:
                 corr = float(np.corrcoef(y_syn, y_pred)[0, 1])
             else:
