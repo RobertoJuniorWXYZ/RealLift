@@ -1,5 +1,6 @@
 import warnings
 import pandas as pd
+import numpy as np
 from ..geo.discovery import discover_geo_clusters
 from ..geo.validation import validate_geo_clusters
 from ..geo.duration import estimate_duration
@@ -128,21 +129,40 @@ def run_geo_experiment(
                 verbose=False # Silent
             )
 
-        # 4. Run synthetic control (Actual results)
-        synthetic = run_synthetic_control(
-            filepath=filepath,
-            date_col=date_col,
-            treatment_geo=cluster["treatment"],
-            control_geos=cluster["control"],
-            treatment_start_date=treatment_start_date,
-            treatment_end_date=treatment_end_date,
-            start_date=start_date,
-            end_date=end_date,
-            random_state=random_state,
-            cluster_idx=i,
-            plot=False,
-            verbose=verbose
-        )
+        # 4. Run Analysis (Actual results)
+        experiment_type = doe.get("experiment_type", "synthetic_control") if doe is not None else "synthetic_control"
+        
+        if experiment_type == "matched_did":
+            from reallift.geo.did import run_matched_did
+            synthetic = run_matched_did(
+                filepath=filepath,
+                date_col=date_col,
+                treatment_geo=cluster["treatment"],
+                control_geos=cluster["control"],
+                treatment_start_date=treatment_start_date,
+                treatment_end_date=treatment_end_date,
+                start_date=start_date,
+                end_date=end_date,
+                random_state=random_state,
+                cluster_idx=i,
+                plot=False,
+                verbose=verbose
+            )
+        else:
+            synthetic = run_synthetic_control(
+                filepath=filepath,
+                date_col=date_col,
+                treatment_geo=cluster["treatment"],
+                control_geos=cluster["control"],
+                treatment_start_date=treatment_start_date,
+                treatment_end_date=treatment_end_date,
+                start_date=start_date,
+                end_date=end_date,
+                random_state=random_state,
+                cluster_idx=i,
+                plot=False,
+                verbose=verbose
+            )
 
         # 5. Placebo tests (Significance)
         placebo = run_placebo_tests(
@@ -159,23 +179,39 @@ def run_geo_experiment(
             random_state=random_state,
             cluster_idx=i,
             plot=False,
-            verbose=verbose
+            verbose=verbose,
+            experiment_type=experiment_type
         )
 
         # 6. Final Plots
         if plot:
-            plot_synthetic_control(
-                df=synthetic["df"],
-                treatment_geo=cluster["treatment"],
-                treatment_idx=synthetic["plotting_data"]["treatment_idx"],
-                y=synthetic["plotting_data"]["y"],
-                synthetic=synthetic["plotting_data"]["synthetic"],
-                effect=synthetic["plotting_data"]["effect"],
-                post_real=synthetic["plotting_data"]["post_real"],
-                post_synth=synthetic["plotting_data"]["post_synth"],
-                effect_pct=synthetic["plotting_data"]["effect_pct"],
-                boot_result=synthetic["bootstrap"]
-            )
+            if experiment_type == "matched_did":
+                from reallift.geo.did import plot_matched_did
+                plot_matched_did(
+                    df=synthetic["df"],
+                    treatment_geo=cluster["treatment"],
+                    treatment_idx=synthetic["plotting_data"]["treatment_idx"],
+                    y=synthetic["plotting_data"]["y"],
+                    synthetic=synthetic["plotting_data"]["synthetic"],
+                    effect=synthetic["plotting_data"]["effect"],
+                    post_real=synthetic["plotting_data"]["post_real"],
+                    post_synth=synthetic["plotting_data"]["post_synth"],
+                    effect_pct=synthetic["plotting_data"]["effect_pct"],
+                    boot_result=synthetic["bootstrap"]
+                )
+            else:
+                plot_synthetic_control(
+                    df=synthetic["df"],
+                    treatment_geo=cluster["treatment"],
+                    treatment_idx=synthetic["plotting_data"]["treatment_idx"],
+                    y=synthetic["plotting_data"]["y"],
+                    synthetic=synthetic["plotting_data"]["synthetic"],
+                    effect=synthetic["plotting_data"]["effect"],
+                    post_real=synthetic["plotting_data"]["post_real"],
+                    post_synth=synthetic["plotting_data"]["post_synth"],
+                    effect_pct=synthetic["plotting_data"]["effect_pct"],
+                    boot_result=synthetic["bootstrap"]
+                )
             plot_placebo_tests(
                 placebo_ratios=placebo["placebo_ratios"],
                 observed_ratio=placebo["observed_ratio"]
@@ -190,6 +226,9 @@ def run_geo_experiment(
         })
 
     if verbose and len(results) > 0:
+        experiment_type = doe.get("experiment_type", "synthetic_control") if doe is not None else "synthetic_control"
+        is_did = experiment_type == "matched_did"
+        
         print("\n" + "=" * 70)
         print(" GEO EXPERIMENT RESULTS SUMMARY ".center(70, "="))
         print("=" * 70)
@@ -223,10 +262,16 @@ def run_geo_experiment(
 
         is_auto_mde = results[0]["duration"]["summary"].get("auto_mde", False)
         if is_auto_mde:
-            print(f"{'Cluster':<7} | {'Corr':<6} | {'OOF R2':<7} | {'MAPE':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
+            if is_did:
+                print(f"{'Cluster':<7} | {'Corr':<6} | {'R2':<7} | {'MAPE':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
+            else:
+                print(f"{'Cluster':<7} | {'Corr':<6} | {'OOF R2':<7} | {'MAPE':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
             print("-" * 85)
         else:
-            print(f"{'Cluster':<7} | {'Corr':<6} | {'OOF R2':<7} | {'MAPE':<6} | {'MDE':<6} | {'Min Days':<10} | {'Power'}")
+            if is_did:
+                print(f"{'Cluster':<7} | {'Corr':<6} | {'R2':<7} | {'MAPE':<6} | {'MDE':<6} | {'Min Days':<10} | {'Power'}")
+            else:
+                print(f"{'Cluster':<7} | {'Corr':<6} | {'OOF R2':<7} | {'MAPE':<6} | {'MDE':<6} | {'Min Days':<10} | {'Power'}")
             print("-" * 75)
         
         all_robust = True
@@ -255,12 +300,13 @@ def run_geo_experiment(
         if all_robust:
             print("\n✔ Strong predictive performance across all clusters. Results are statistically reliable.")
         else:
-            print("\n⚠️ Note: Some clusters show lower predictive robustness (OOF R2 <= 0.6). Interpret with caution.")
+            print("\n⚠️ Note: Some clusters show lower predictive robustness (R2 <= 0.6). Interpret with caution.")
             
         print("\n" + "-" * 125)
         print(" CLUSTER-LEVEL INCREMENTAL IMPACT ".center(125, "-"))
         print("-" * 125)
-        print(f"{'Cluster':<7} | {'Treatment':<10} | {'Observed':<10} | {'Synthetic':<10} | {'Lift (%)':<8} | {'Lift (abs)':<10} | {'CI 95% (%)':<18} | {'CI 95% (abs)':<18} | {'Sig'}")
+        synth_label = "Matched" if is_did else "Synthetic"
+        print(f"{'Cluster':<7} | {'Treatment':<10} | {'Observed':<10} | {synth_label:<10} | {'Lift (%)':<8} | {'Lift (abs)':<10} | {'CI 95% (%)':<18} | {'CI 95% (abs)':<18} | {'Sig'}")
         print("-" * 125)
         
         tot_lifts_abs = []
@@ -304,14 +350,38 @@ def run_geo_experiment(
         sum_lift = sum_real - sum_synth
         agg_lift_pct = sum_lift / sum_synth if sum_synth != 0 else 0.0
         
-        agg_ci_l_abs = sum(ci_lowers_abs)
-        agg_ci_u_abs = sum(ci_uppers_abs)
-        agg_ci_l_pct = agg_ci_l_abs / sum_synth if sum_synth != 0 else 0.0
-        agg_ci_u_pct = agg_ci_u_abs / sum_synth if sum_synth != 0 else 0.0
+        # Proper aggregated bootstrap for confidence intervals
+        try:
+            import numpy as np
+            from reallift.geo.bootstrap import bootstrap_significance
+            
+            # Extract time series arrays for the post period
+            post_len = len(results[0]["synthetic"]["plotting_data"]["post_real"])
+            consolidated_post_real = np.zeros(post_len)
+            consolidated_post_synth = np.zeros(post_len)
+            
+            for res in results:
+                consolidated_post_real += res["synthetic"]["plotting_data"]["post_real"]
+                consolidated_post_synth += res["synthetic"]["plotting_data"]["post_synth"]
+                
+            consolidated_effect = consolidated_post_real - consolidated_post_synth
+            cons_boot = bootstrap_significance(consolidated_effect, consolidated_post_synth, random_state=random_state)
+            
+            agg_ci_l_abs = cons_boot["ci_lower_total_abs"]
+            agg_ci_u_abs = cons_boot["ci_upper_total_abs"]
+            agg_ci_l_pct = cons_boot["ci_lower_total_pct"]
+            agg_ci_u_pct = cons_boot["ci_upper_total_pct"]
+        except Exception:
+            # Fallback to sum of bounds
+            agg_ci_l_abs = sum(ci_lowers_abs)
+            agg_ci_u_abs = sum(ci_uppers_abs)
+            agg_ci_l_pct = agg_ci_l_abs / sum_synth if sum_synth != 0 else 0.0
+            agg_ci_u_pct = agg_ci_u_abs / sum_synth if sum_synth != 0 else 0.0
         
         print("\n=== CONSOLIDATED IMPACT ===\n")
         print(f"  Total Observed Output          : {sum_real:,.2f}")
-        print(f"  Total Synthetic (Expected)     : {sum_synth:,.2f}")
+        expected_label = "Matched Baseline (Expected)" if is_did else "Synthetic (Expected)"
+        print(f"  Total {expected_label:<21}: {sum_synth:,.2f}")
         print(f"  --------------------------------------------------")
         print(f"  INCREMENTAL ABOLUTE LIFT       : {sum_lift:,.2f}")
         print(f"  95% Confidence Interval (abs)  : [{agg_ci_l_abs:,.1f}, {agg_ci_u_abs:,.1f}]")
@@ -330,238 +400,7 @@ def run_geo_experiment(
         "results": results
     }
 
-def run_geo_requirements(
-    filepath,
-    date_col,
-    start_date=None,
-    end_date=None,
-    n_treatment=1,
-    fixed_treatment=None,
-    n_folds=5,
-    mde=0.015,
-    experiment_days=[21, 60],
-    verbose=True
-) -> dict:
-    """
-    Consolidate GEO experiment requirements: finds clusters, validates them, and estimates duration.
-    Produces a structured report for each cluster found.
 
-    .. deprecated::
-        Use `design_of_experiments()` instead, which provides multi-scenario comparison,
-        global screening, and a more comprehensive experiment design workflow.
-    """
-    warnings.warn(
-        "run_geo_requirements() is deprecated. Use design_of_experiments() instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    # 1. Find best clusters
-    clusters = discover_geo_clusters(
-        filepath=filepath,
-        date_col=date_col,
-        n_treatment=n_treatment,
-        fixed_treatment=fixed_treatment,
-        start_date=start_date,
-        end_date=end_date,
-        verbose=verbose
-    )
-
-    # 2. Validate clusters (silent, we'll format the output manually)
-    validation_results = validate_geo_clusters(
-        filepath=filepath,
-        date_col=date_col,
-        splits=clusters,
-        treatment_start_date=end_date,
-        start_date=start_date,
-        n_folds=n_folds,
-        plot=False,
-        verbose=False # Silent
-    )
-    cv_summary = validation_results["summary"]
-
-    final_results = []
-
-    for i, cluster in enumerate(clusters):
-        # 3. Estimate duration (silent)
-        duration_results = estimate_duration(
-            filepath=filepath,
-            date_col=date_col,
-            treatment_geo=cluster["treatment"], # Pass whole list
-            control_geos=cluster["control"],
-            start_date=start_date,
-            end_date=end_date,
-            mde=mde,
-            experiment_days=experiment_days,
-            verbose=False # Silent
-        )
-        stats = duration_results["summary"]
-
-        # 4. Extract CV metrics for this specific cluster
-        cv_metric = cv_summary.iloc[i]
-
-        if verbose:
-            print(f"\n=== GEO EXPERIMENT REQUIREMENTS (Cluster {i}) ===")
-            print(f"Treatment: {cluster['treatment']}")
-            print(f"Control: {cluster['control']}")
-
-            print(f"\n=== EVALUATING PERIOD ===")
-            print(f"Start Date: {cv_metric['start_date']}")
-            print(f"End Date: {cv_metric['end_date']}")            
-
-            print(f"\n=== CROSS-VALIDATION ({n_folds} FOLDS) ===")
-            print(f"Train R2: {cv_metric['r2_train']:.4f} | OOF R2: {cv_metric['r2_test']:.4f}")
-            print(f"Train MAPE: {cv_metric['mape_train']:.4f} | OOF MAPE: {cv_metric['mape_test']:.4f}")
-            print(f"Train WAPE: {cv_metric['wape_train']:.4f} | OOF WAPE: {cv_metric['wape_test']:.4f}")
-
-            print(f"\n=== REGRESSION STATISTICS ===")
-            print(f"Mean: {stats['mean']:.2f}")
-            print(f"Std Residual: {stats['sigma']:.4f}")
-            print(f"R-Squared: {stats['r_squared']:.4f}")
-            print(f"Correlation: {stats['correlation']:.3f}")
-
-            if stats.get("auto_mde", False):
-                mde_curve = duration_results["mde_curve"]
-                print(f"\n=== MDE CURVE (power={DEFAULT_POWER:.0%}) ===")
-                print(f"{'Days':<6} | {'MDE':<16}")
-                print("-" * 26)
-                display_days = [d for d in mde_curve["days"] if d % 7 == 0 or d == mde_curve["days"].iloc[0] or d == mde_curve["days"].iloc[-1]]
-                for _, row in mde_curve[mde_curve["days"].isin(display_days)].iterrows():
-                    print(f"{int(row['days']):<6} | {row['mde']*100:<15.2f}%")
-            else:
-                print(f"\n=== MDE ===")
-                print(f"MDE: {mde*100:.2f}%")
-                print(f"Effect absolute: {stats['delta_abs']:.2f}")
-                print(f"Effect percent real: {stats['delta_pct']*100:.2f}%")
-
-                print(f"\n=== RESULT ===")
-                if stats['best_days']:
-                    print(f"✔ Min duration: {int(stats['best_days'])} days")
-                    print(f"✔ Power: {stats['best_power']:.2%}")
-                else:
-                    print("⚠️ Did not reach target power in tested days")
-                    print(f"👉 Estimated duration needed: {stats['estimated_days_needed']} days")
-            
-            print("") # Extra newline for spacing
-        
-        result_entry = {
-            "cluster": cluster,
-            "validation": cv_metric.to_dict(),
-            "duration": stats,
-            "duration_raw": duration_results,
-        }
-        if stats.get("auto_mde", False):
-            result_entry["mde_curve"] = duration_results["mde_curve"]
-        final_results.append(result_entry)
-
-    # Collect all treatments and controls (needed for consolidated calc regardless of verbose)
-    all_treatments = set()
-    all_controls = set()
-    for res in final_results:
-        all_treatments.update(res["cluster"]["treatment"])
-        all_controls.update(res["cluster"]["control"])
-    all_treatments_sorted = sorted(list(all_treatments))
-    all_controls_sorted = sorted(list(all_controls))
-
-    is_auto_mde = final_results[0]["duration"].get("auto_mde", False) if final_results else False
-
-    if verbose:
-        print("\n=== GEO EXPERIMENT REQUIREMENT SUMMARY ===\n")
-
-        if is_auto_mde:
-            print(f"{'Cluster':<7} | {'Treatment':<12} | {'Correlation':<11} | {'OOF R2':<6} | {'MAPE':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
-            print("-" * 85)
-        else:
-            print(f"{'Cluster':<7} | {'Treatment':<12} | {'Correlation':<11} | {'OOF R2':<6} | {'MAPE':<6} | {'MDE':<5} | {'Min Duration':<12} | {'Power':<5}")
-            print("-" * 80)
-        
-        max_duration = 0
-        all_durations_found = True
-        
-        for i, res in enumerate(final_results):
-            treatment_str = ", ".join(res["cluster"]["treatment"])
-            if len(treatment_str) > 12:
-                treatment_str = treatment_str[:9] + "..."
-            
-            corr = res["duration"].get("correlation", 0)
-            oof_r2 = res["validation"]["r2_test"]
-            mape_val = res["validation"]["mape_test"]
-
-            if is_auto_mde:
-                mde_curve = res.get("mde_curve")
-                if mde_curve is not None:
-                    mde_21 = mde_curve.loc[mde_curve["days"] == 21, "mde"]
-                    mde_30 = mde_curve.loc[mde_curve["days"] == 30, "mde"]
-                    mde_60 = mde_curve.loc[mde_curve["days"] == 60, "mde"]
-                    mde_21_str = f"{mde_21.values[0]*100:.2f}%" if len(mde_21) > 0 else "N/A"
-                    mde_30_str = f"{mde_30.values[0]*100:.2f}%" if len(mde_30) > 0 else "N/A"
-                    mde_60_str = f"{mde_60.values[0]*100:.2f}%" if len(mde_60) > 0 else "N/A"
-                else:
-                    mde_21_str = mde_30_str = mde_60_str = "N/A"
-                print(f"{i:<7} | {treatment_str:<12} | {corr:<11.4f} | {oof_r2:<6.4f} | {mape_val:<6.4f} | {mde_21_str:<9} | {mde_30_str:<9} | {mde_60_str:<9}")
-            else:
-                mde_val = res["duration"]["mde"] * 100
-                min_dur = res["duration"]["best_days"]
-                if min_dur:
-                    dur_str = f"{int(min_dur)}d"
-                    power_str = f"{res['duration']['best_power']*100:.2f}%"
-                    max_duration = max(max_duration, int(min_dur))
-                else:
-                    dur_str = "N/A"
-                    power_str = "N/A"
-                    all_durations_found = False
-                print(f"{i:<7} | {treatment_str:<12} | {corr:<11.4f} | {oof_r2:<6.4f} | {mape_val:<6.4f} | {mde_val:<4.2f}% | {dur_str:<12} | {power_str:<5}")
-            
-        print("\n=== CLUSTER ASSIGNMENTS ===\n")
-        print(f"{'Cluster':<7} | {'Treatment':<12} | {'Controls'}")
-        print("-" * 80)
-        for i, res in enumerate(final_results):
-            treatment_str = ", ".join(res["cluster"]["treatment"])
-            if len(treatment_str) > 12:
-                treatment_str = treatment_str[:9] + "..."
-            control_str = ", ".join(res["cluster"]["control"])
-            print(f"{i:<7} | {treatment_str:<12} | {control_str}")
-            
-        print("\n\n=== RECOMMENDED EXPERIMENT SETUP ===\n")
-        
-        print(f"Selected Geos For Treatment: {', '.join(all_treatments_sorted)}")
-        print(f"Selected Geos For Control: {', '.join(all_controls_sorted)}\n")
-        
-        if not is_auto_mde and all_durations_found and max_duration > 0:
-            print(f"Recommended duration for intervention: {max_duration} days")
-            print("\nRationale:")
-            print("Duration chosen to satisfy statistical power requirements across all clusters.")
-            print("Ensures consistent measurement and comparability.\n")
-        elif not is_auto_mde:
-            print("Recommended duration for intervention: N/A")
-            print("\nRationale:")
-            print("One or more clusters did not reach the minimum statistical power within the maximum tested days.")
-            print("Consider increasing the MDE, the experiment_days limit, or relaxing the fixed geographical splits.\n")
-
-    # 5. Consolidated MDE (residual variance analysis)
-    cluster_residuals = [
-        res["duration_raw"]["residuals"]
-        for res in final_results
-        if res.get("duration_raw") and res["duration_raw"].get("residuals") is not None
-    ]
-
-    consolidated_duration = estimate_duration(
-        filepath=filepath,
-        date_col=date_col,
-        treatment_geo=all_treatments_sorted,
-        start_date=start_date,
-        end_date=end_date,
-        mde=mde,
-        experiment_days=experiment_days,
-        consolidated=True,
-        cluster_residuals=cluster_residuals if cluster_residuals else None,
-        verbose=verbose
-    )
-
-    return {
-        "clusters": clusters,
-        "results": final_results,
-        "consolidated_duration": consolidated_duration
-    }
 
 
 def design_of_experiments(
@@ -576,6 +415,7 @@ def design_of_experiments(
     experiment_days=DEFAULT_EXPERIMENT_DAYS,
     n_folds=5,
     search_mode="ranking",
+    experiment_type="synthetic_control",
     verbose=True
 ) -> dict:
     """
@@ -612,6 +452,10 @@ def design_of_experiments(
     Returns:
         dict with 'scenarios' list and 'comparison' DataFrame.
     """
+    valid_types = ["synthetic_control", "matched_did"]
+    if experiment_type not in valid_types:
+        raise ValueError(f"Invalid experiment_type '{experiment_type}'. Allowed types are 'synthetic_control' and 'matched_did'.")
+
     # 1. Detect available geos
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
@@ -729,18 +573,10 @@ def design_of_experiments(
                     verbose=False
                 )
             elif global_ranking is not None:
-                # Ranking mode: use pre-screened top-k
-                clusters = discover_geo_clusters(
-                    filepath=filepath,
-                    date_col=date_col,
-                    geos=geos,
-                    fixed_treatment=global_ranking[:n_treat],
-                    start_date=start_date,
-                    end_date=end_date,
-                    verbose=False
-                )
+                # Greedy Sequential Search mode handles discovery inside OOF loop
+                clusters = None
             else:
-                # Exhaustive/auto mode: find best GROUP, then build individual clusters
+                # Exhaustive mode
                 best_groups = discover_geo_clusters(
                     filepath=filepath,
                     date_col=date_col,
@@ -752,12 +588,10 @@ def design_of_experiments(
                     verbose=True,
                     show_results=False
                 )
-                # Extract treatment geos from the top-1 recommendation
                 best_treatment_geos = best_groups[0]["treatment"]
                 if verbose:
                     print(f"  Best combination: {best_treatment_geos}")
 
-                # Re-evaluate individually with proper cross-exclusion
                 clusters = discover_geo_clusters(
                     filepath=filepath,
                     date_col=date_col,
@@ -779,18 +613,181 @@ def design_of_experiments(
             })
             continue
 
-        # 4b. Cross-validation per cluster
-        validation = validate_geo_clusters(
-            filepath=filepath,
-            date_col=date_col,
-            splits=clusters,
-            treatment_start_date=end_date, # In DoE, end_date is the pre-post split for CV
-            start_date=start_date,
-            n_folds=n_folds,
-            plot=False,
-            verbose=False
-        )
-        cv_summary = validation["summary"]
+        # 4b. OOF Refinement & Cross-validation
+        refined_clusters = []
+        cv_rows = []
+        df_pre = df.copy()
+        
+        run_as_matched_did = (experiment_type == "matched_did")
+
+        if global_ranking is not None:
+            if run_as_matched_did:
+                if verbose: print("\n  [Matched DiD] Evaluating all candidates to maximize correlation...")
+                
+                all_evals = []
+                for candidate in geos:
+                    try:
+                        candidate_eval = discover_geo_clusters(
+                            filepath=filepath, date_col=date_col, geos=geos,
+                            fixed_treatment=[candidate], start_date=start_date, end_date=end_date,
+                            verbose=False, show_results=False
+                        )
+                        current_cluster = candidate_eval[0].copy()
+                    except Exception:
+                        continue
+                    
+                    best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
+                        current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type=experiment_type
+                    )
+                    
+                    all_evals.append({
+                        "raw": current_cluster, "best": best_cluster, "cv": best_cv_row,
+                        "candidate": candidate, "r2": best_cv_row["r2_test"], "iters": iters
+                    })
+                
+                # Sort descending by maximum reached holistic R²
+                all_evals.sort(key=lambda x: x["r2"], reverse=True)
+                
+                locked_treatments = []
+                
+                # First pass: try to pick perfectly disjoint treatments (no treatment serves as donor to another)
+                for item in all_evals:
+                    if len(refined_clusters) >= n_treat: break
+                    candidate = item["candidate"]
+                    donors = item["best"]["control"]
+                    
+                    if candidate not in locked_treatments and not any(l in donors for l in locked_treatments):
+                        if verbose: print(f"    - Candidate: {candidate:<10} Selected (R² = {item['r2']:.4f}, Iters: {item['iters']})      ")
+                        refined_clusters.append(item)
+                        locked_treatments.append(candidate)
+                        
+                # Second pass: if quota not met due to overlaps, relax disjointness and just pick highest R²
+                if len(refined_clusters) < n_treat:
+                    for item in all_evals:
+                        if len(refined_clusters) >= n_treat: break
+                        candidate = item["candidate"]
+                        if candidate not in locked_treatments:
+                            best_cluster_mod = item["best"].copy()
+                            # Clean up controls so they don't include other locked treatments
+                            best_cluster_mod["control"] = [d for d in best_cluster_mod["control"] if d not in locked_treatments]
+                            best_cluster_mod["control_weights"] = [1.0/len(best_cluster_mod["control"])] * len(best_cluster_mod["control"]) if len(best_cluster_mod["control"]) > 0 else []
+                            
+                            item["best"] = best_cluster_mod
+                            if verbose: print(f"    - Candidate: {candidate:<10} Selected (R² = {item['r2']:.4f}, Iters: {item['iters']})      ")
+                            refined_clusters.append(item)
+                            locked_treatments.append(candidate)
+                            
+                # Sort refined_clusters so final output is strict R2 order
+                refined_clusters.sort(key=lambda x: x["r2"], reverse=True)
+                            
+            else:
+                if verbose: print("\n  [Greedy Sequential Search] Screening through ranking queue...")
+                
+                locked_treatments = []
+                fallback_queue = []
+                
+                for candidate in global_ranking:
+                    if len(refined_clusters) >= n_treat:
+                        break
+                        
+                    available_geos = [g for g in geos if g not in locked_treatments]
+                    
+                    try:
+                        candidate_eval = discover_geo_clusters(
+                            filepath=filepath, date_col=date_col, geos=available_geos,
+                            fixed_treatment=[candidate], start_date=start_date, end_date=end_date,
+                            verbose=False, show_results=False
+                        )
+                        current_cluster = candidate_eval[0].copy()
+                    except Exception:
+                        if verbose: print("Failed discovery.")
+                        continue
+                    
+                    best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
+                        current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type=experiment_type
+                    )
+                    
+                    r2_t = best_cv_row["r2_test"]
+                    gap_t = best_cv_row["r2_train"] - r2_t
+                    
+                    if passed:
+                        if verbose: print(f"    - Candidate: {candidate:<10} Approved (OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iters: {iters})      ")
+                        refined_clusters.append({"raw": current_cluster, "best": best_cluster, "cv": best_cv_row})
+                        locked_treatments.append(candidate)
+                    else:
+                        if verbose: print(f"    - Candidate: {candidate:<10} Failed strict rules (OOF R² = {r2_t:.4f}). Moved to fallback.      ")
+                        fallback_queue.append({"raw": current_cluster, "best": best_cluster, "cv": best_cv_row})
+                
+                used_fallback = len(refined_clusters) < n_treat
+                
+                if used_fallback:
+                    needed = n_treat - len(refined_clusters)
+                    if verbose:
+                        print(f"\n  [Fallback] Quota not met. Picking {needed} 'least bad' clusters from failed queue...")
+                    fallback_queue.sort(key=lambda x: x["cv"]["r2_test"], reverse=True)
+                    for i in range(min(needed, len(fallback_queue))):
+                        item = fallback_queue[i]
+                        if verbose:
+                            print(f"    - Recovered: {item['best']['treatment'][0]:<10} (OOF R² = {item['cv']['r2_test']:.4f})")
+                        refined_clusters.append(item)
+                        
+                if experiment_type == "synthetic_control" and used_fallback:
+                    if verbose:
+                        print("\n  [AUTO SENSOR] ⚠ Strict rules failed for some Geos. Data may be too volatile for stable Synthetic Control.")
+                        print("                  Consider re-evaluating the design with experiment_type='matched_did'.")
+            
+            clusters = [item["best"] for item in refined_clusters]
+            cv_rows = [item["cv"] for item in refined_clusters]
+            cv_summary = pd.DataFrame(cv_rows).reset_index(drop=True)
+            
+        else:
+            if verbose: print(f"\n  [{'Matched DiD' if experiment_type == 'matched_did' else 'OOF Refinement'}]:")
+            
+            raw_items = []
+            all_passed = True
+            
+            for i, cluster in enumerate(clusters):
+                treat_list = cluster['treatment']
+                treat_str = treat_list[0] if treat_list else "Unknown"
+                
+                eval_cluster = cluster.copy()
+                
+                best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
+                    eval_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type=experiment_type
+                )
+                
+                r2_t = best_cv_row["r2_test"]
+                gap_t = best_cv_row["r2_train"] - r2_t
+                
+                if experiment_type == "matched_did":
+                    if passed:
+                        if verbose: print(f"    - Cluster {i} ({treat_str:<10}) Optimal Found (R² = {r2_t:.4f}, Iterations: {iters})      ")
+                    else:
+                        if verbose: print(f"    - Cluster {i} ({treat_str:<10}) Failed strict rules. Best R² = {r2_t:.4f}, Iterations: {iters}      ")
+                        all_passed = False
+                else:
+                    if passed:
+                        if verbose: print(f"    - Cluster {i} ({treat_str:<10}) Optimal Found (OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iterations: {iters})      ")
+                    else:
+                        if verbose: print(f"    - Cluster {i} ({treat_str:<10}) Failed strict rules. Best OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iterations: {iters}      ")
+                        all_passed = False
+                
+                raw_items.append({
+                    "raw": eval_cluster,
+                    "best": best_cluster,
+                    "cv": best_cv_row,
+                    "passed": passed
+                })
+
+            if experiment_type == "synthetic_control" and not all_passed:
+                if verbose:
+                    print("\n  [AUTO SENSOR] ⚠ Some fixed clusters failed strict rules. Data may be too volatile for stable Synthetic Control.")
+                    print("                  Consider re-evaluating the design with experiment_type='matched_did'.")
+                    
+            clusters = [item["best"] for item in raw_items]
+            cv_rows = [item["cv"] for item in raw_items]
+            cv_summary = pd.DataFrame(cv_rows).reset_index(drop=True)
+
 
         # 4c. Estimate duration (per-cluster + consolidated)
         duration = estimate_duration(
@@ -806,11 +803,16 @@ def design_of_experiments(
 
         # 4d. Compact verbose per scenario
         if verbose:
-            _print_scenario_table(clusters, duration, mde, cv_summary, total_geos=n_geos)
+            _print_scenario_table(clusters, duration, mde, cv_summary, total_geos=n_geos, experiment_days=experiment_days, experiment_type=experiment_type)
+
+        treatment_pool = []
+        for c in clusters:
+            treatment_pool.extend(c["treatment"])
 
         scenarios.append({
             "pct_treatment": pct,
             "n_treatment": n_treat,
+            "treatment_pool": treatment_pool,
             "clusters": clusters,
             "duration": duration,
             "validation": cv_summary,
@@ -820,9 +822,10 @@ def design_of_experiments(
     comparison = _build_comparison(scenarios, mde, experiment_days)
 
     if verbose:
-        _print_comparison_table(comparison, mde)
+        _print_comparison_table(comparison, mde, experiment_days=experiment_days)
 
     return {
+        "experiment_type": experiment_type,
         "scenarios": scenarios,
         "comparison": comparison,
     }
@@ -830,7 +833,131 @@ def design_of_experiments(
 
 # ── DoE Helpers ───────────────────────────────────────────────────────────
 
-def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=None):
+def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type="synthetic_control"):
+    import cvxpy as cp
+    import numpy as np
+    from reallift.geo.validation import validate_geo_clusters
+
+    current_cluster = cluster.copy()
+    history = []
+
+    while True:
+        if experiment_type == "matched_did":
+            # Bypass OOF splitting for Matched DiD, evaluate holistic equal-weighted R² 
+            t_cols = current_cluster["treatment"]
+            c_cols = current_cluster["control"]
+            y_hol = df_pre[t_cols].mean(axis=1).values.astype(float)
+            if len(c_cols) > 0:
+                X_hol = df_pre[c_cols].mean(axis=1).values.astype(float)
+            else:
+                X_hol = np.zeros_like(y_hol)
+                
+            if np.std(y_hol) > 0 and np.std(X_hol) > 0:
+                corr_hol = float(np.corrcoef(y_hol, X_hol)[0, 1])
+            else:
+                corr_hol = 0.0
+                
+            # Treat r2_holistic identically so OOF rules just validate raw correlation
+            r2_hol = corr_hol ** 2
+            
+            cv_row = pd.Series({
+                "treatment": current_cluster["treatment"],
+                "r2_train": r2_hol,
+                "r2_test": r2_hol,
+                "mape_train": 0.0, "mape_test": 0.0,
+                "wape_train": 0.0, "wape_test": 0.0
+            })
+        else:
+            validation = validate_geo_clusters(
+                filepath=filepath,
+                date_col=date_col,
+                splits=[current_cluster],
+                treatment_start_date=end_date,
+                start_date=start_date,
+                n_folds=n_folds,
+                plot=False,
+                verbose=False
+            )
+            cv_row = validation["summary"].iloc[0]
+            
+        history.append((current_cluster.copy(), cv_row))
+
+        controls = current_cluster["control"].copy()
+        weights = current_cluster.get("control_weights", []).copy()
+        
+        if len(controls) <= 1:
+            break
+        
+        min_idx = int(np.argmin(weights)) if len(weights) > 0 else -1
+        if min_idx >= 0:
+            controls.pop(min_idx)
+            weights.pop(min_idx)
+        else:
+            controls.pop()
+        
+        t_cols = current_cluster["treatment"]
+        y_syn = df_pre[t_cols].mean(axis=1).values.astype(float)
+        X_syn = df_pre[controls].values.astype(float)
+        
+        y_mean_syn = y_syn.mean() if y_syn.mean() != 0 else 1e-10
+        X_mean_syn = X_syn.mean(axis=0)
+        X_mean_syn[X_mean_syn == 0] = 1e-10
+
+        y_norm_syn = y_syn / y_mean_syn
+        X_norm_syn = X_syn / X_mean_syn
+
+        w_syn = cp.Variable(len(controls))
+        alpha_syn = cp.Variable()
+
+        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn + alpha_syn)))
+        cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
+        prob_syn = cp.Problem(obj_syn, cons_syn)
+        
+        try:
+            prob_syn.solve(solver=cp.SCS, verbose=False)
+            w_vals = np.array(w_syn.value).flatten()
+            w_vals[w_vals < 0] = 0.0
+            sum_w = np.sum(w_vals)
+            if sum_w > 0:
+                w_vals = w_vals / sum_w
+            new_weights = [float(w) for w in w_vals]
+            
+            alpha_val = alpha_syn.value if alpha_syn.value is not None else 0.0
+            y_pred = (X_norm_syn @ np.array(new_weights) + alpha_val) * y_mean_syn
+            if np.std(y_syn) > 0 and np.std(y_pred) > 0:
+                corr = float(np.corrcoef(y_syn, y_pred)[0, 1])
+            else:
+                corr = 0.0
+        except Exception:
+            new_weights = [1.0/len(controls)] * len(controls)
+            corr = 0.0
+
+        current_cluster["control"] = controls
+        current_cluster["control_weights"] = new_weights
+        current_cluster["correlation"] = corr
+
+    valid_steps = [
+        step for step in history 
+        if step[1]["r2_test"] >= 0.6 and (step[1]["r2_train"] - step[1]["r2_test"]) <= 0.20
+    ]
+
+    if valid_steps:
+        valid_steps.sort(key=lambda x: x[1]["r2_test"], reverse=True)
+        best_cluster, best_cv_row = valid_steps[0]
+        passed = True
+    else:
+        history.sort(key=lambda x: x[1]["r2_test"], reverse=True)
+        best_cluster, best_cv_row = history[0]
+        passed = False
+        
+    if experiment_type == "matched_did":
+        controls = best_cluster["control"]
+        if len(controls) > 0:
+            best_cluster["control_weights"] = [1.0 / len(controls)] * len(controls)
+        
+    return best_cluster, best_cv_row, passed, len(history)
+
+def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=None, experiment_days=None, experiment_type=None):
     """Print compact per-cluster table for a scenario with CV metrics and donor pools."""
     cluster_results = duration["cluster_results"]
     consolidated = duration["consolidated"]
@@ -839,70 +966,73 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
 
     # ── Duration & MDE Grid ──
     if is_auto:
-        print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'#Ctrl':<5} | {'σ':<8} | {'R²':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
-        print("  " + "-" * 80)
+        days_to_print = experiment_days if experiment_days else [21, 30, 60]
+        mde_cols = [f"MDE @{d}d" for d in days_to_print]
+        mde_hdr = " | ".join(f"{col:<9}" for col in mde_cols)
+        print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'Controls':<8} | {mde_hdr}")
+        print("  " + "-" * (35 + len(mde_hdr)))
 
         for i, (cl, cr) in enumerate(zip(clusters, cluster_results)):
             treat = ", ".join(cl["treatment"])
             if len(treat) > 10:
                 treat = treat[:7] + "..."
-            n_ctrl = len(cl["control"])
-            sigma = cr["summary"]["sigma"]
-            r2 = cr["summary"].get("r_squared", 0)
+            weights = cl.get("control_weights", [])
+            n_ctrl = sum(1 for w in weights if w > 0.001) if weights else len(cl["control"])
+            
             curve = cr.get("mde_curve")
 
             mde_strs = []
-            for d in [21, 30, 60]:
+            for d in days_to_print:
                 if curve is not None:
                     val = curve.loc[curve["days"] == d, "mde"]
                     mde_strs.append(f"{val.values[0]*100:.2f}%" if len(val) > 0 else "N/A")
                 else:
                     mde_strs.append("N/A")
 
-            print(f"  {i:<7} | {treat:<10} | {n_ctrl:<5} | {sigma:<8.4f} | {r2:<6.4f} | {mde_strs[0]:<9} | {mde_strs[1]:<9} | {mde_strs[2]:<9}")
+            mde_row = " | ".join(f"{s:<9}" for s in mde_strs)
+            print(f"  {i:<7} | {treat:<10} | {n_ctrl:<8} | {mde_row}")
 
         # Consolidated row
         c_summary = consolidated["summary"]
-        c_sigma = c_summary["sigma"]
         c_curve = consolidated.get("mde_curve")
         c_mdes = []
-        for d in [21, 30, 60]:
+        for d in days_to_print:
             if c_curve is not None:
                 val = c_curve.loc[c_curve["days"] == d, "mde"]
                 c_mdes.append(f"{val.values[0]*100:.2f}%" if len(val) > 0 else "N/A")
             else:
                 c_mdes.append("N/A")
 
-        print("  " + "-" * 80)
-        print(f"  {'CONSOL.':<7} | {'pooled':<10} | {'':<5} | {c_sigma:<8.4f} | {'':<6} | {c_mdes[0]:<9} | {c_mdes[1]:<9} | {c_mdes[2]:<9}")
+        c_mdes_str = " | ".join(f"{s:<9}" for s in c_mdes)
+        print("  " + "-" * (35 + len(mde_hdr)))
+        print(f"  {'CONSOL.':<7} | {'pooled':<10} | {'':<8} | {c_mdes_str}")
     else:
-        print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'#Ctrl':<5} | {'σ':<8} | {'R²':<6} | {'Min Days':<8} | {'Power':<7}")
-        print("  " + "-" * 65)
+        print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'Controls':<8} | {'Min Days':<8} | {'Power':<7}")
+        print("  " + "-" * 51)
 
         for i, (cl, cr) in enumerate(zip(clusters, cluster_results)):
             treat = ", ".join(cl["treatment"])
             if len(treat) > 10:
                 treat = treat[:7] + "..."
-            n_ctrl = len(cl["control"])
-            sigma = cr["summary"]["sigma"]
-            r2 = cr["summary"].get("r_squared", 0)
+            weights = cl.get("control_weights", [])
+            n_ctrl = sum(1 for w in weights if w > 0.001) if weights else len(cl["control"])
+
             best_days = cr["summary"].get("best_days")
             best_power = cr["summary"].get("best_power")
 
             days_str = f"{int(best_days)}d" if best_days else "N/A"
             power_str = f"{best_power:.1%}" if best_power else "N/A"
 
-            print(f"  {i:<7} | {treat:<10} | {n_ctrl:<5} | {sigma:<8.4f} | {r2:<6.4f} | {days_str:<8} | {power_str:<7}")
+            print(f"  {i:<7} | {treat:<10} | {n_ctrl:<8} | {days_str:<8} | {power_str:<7}")
 
         c_summary = consolidated["summary"]
-        c_sigma = c_summary["sigma"]
         c_best = c_summary.get("best_days")
         c_power = c_summary.get("best_power")
         c_days_str = f"{int(c_best)}d" if c_best else "N/A"
         c_power_str = f"{c_power:.1%}" if c_power else "N/A"
 
-        print("  " + "-" * 65)
-        print(f"  {'CONSOL.':<7} | {'pooled':<10} | {'':<5} | {c_sigma:<8.4f} | {'':<6} | {c_days_str:<8} | {c_power_str:<7}")
+        print("  " + "-" * 51)
+        print(f"  {'CONSOL.':<7} | {'pooled':<10} | {'':<8} | {c_days_str:<8} | {c_power_str:<7}")
 
     # ── Treatment & Donor Layout ──
     all_treatments = set()
@@ -925,39 +1055,67 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
         weights = cl.get("control_weights", [])
         controls = cl["control"]
         
-        # Sort donors by weight DESC
-        donors = sorted(zip(controls, weights), key=lambda x: x[1], reverse=True)
-        # Only show donors with weight > 0.001
-        donor_strs = [f"{d} ({w:.3f})" for d, w in donors if w > 0.001]
-        
-        print(f"  Cluster {i} ({treat_name:<10}): ", end="")
-        for j in range(0, len(donor_strs), 4):
-            chunk = donor_strs[j:j+4]
-            if j > 0: print(" " * 24, end="")
-            print(" | ".join(chunk))
+        is_uniform = False
+        if weights and len(weights) > 1:
+            if (max(weights) - min(weights)) < 0.001:
+                is_uniform = True
+
+        if is_uniform:
+            mode_label = "Matched DiD" if experiment_type == "matched_did" else "Synthetic Control (Uniform)"
+            donor_list = ", ".join(controls)
+            # If the list is too massive, truncate it 
+            if len(donor_list) > 60:
+                donor_list = donor_list[:57] + "..."
+            print(f"  Cluster {i} ({treat_name:<10}): [{mode_label}] {len(controls)} selected donor geos ({donor_list}).")
+        else:
+            # Sort donors by weight DESC
+            donors = sorted(zip(controls, weights), key=lambda x: x[1], reverse=True)
+            # Only show donors with weight > 0.001
+            donor_strs = [f"{d} ({w:.3f})" for d, w in donors if w > 0.001]
+            
+            print(f"  Cluster {i} ({treat_name:<10}): ", end="")
+            for j in range(0, len(donor_strs), 4):
+                chunk = donor_strs[j:j+4]
+                if j > 0: print(" " * 24, end="")
+                print(" | ".join(chunk))
 
     # ── Cross-Validation Grid ──
     if cv_summary is not None and not cv_summary.empty:
-        print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'R² Train':<8} | {'R² Test':<8} | {'MAPE Tr':<8} | {'MAPE Te':<8} | {'WAPE Tr':<8} | {'WAPE Te':<8}")
-        print("  " + "-" * 80)
+        is_pure_did = experiment_type == "matched_did"
+        
+        if is_pure_did:
+            print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'R²':<17}")
+            print("  " + "-" * 38)
 
-        for i, row in cv_summary.iterrows():
-            treat = ", ".join(row["treatment"]) if isinstance(row["treatment"], list) else str(row["treatment"])
-            if len(treat) > 10:
-                treat = treat[:7] + "..."
+            for i, row in cv_summary.iterrows():
+                treat = ", ".join(row["treatment"]) if isinstance(row["treatment"], list) else str(row["treatment"])
+                if len(treat) > 10:
+                    treat = treat[:7] + "..."
 
-            r2_tr = f"{row['r2_train']:.4f}"
-            r2_te = f"{row['r2_test']:.4f}"
-            mape_tr = f"{row['mape_train']:.4f}"
-            mape_te = f"{row['mape_test']:.4f}"
-            wape_tr = f"{row['wape_train']:.4f}"
-            wape_te = f"{row['wape_test']:.4f}"
+                r2 = f"{row['r2_test']:.4f}"
 
-            # Flag overfitting
-            gap = row['r2_train'] - row['r2_test']
-            flag = " ⚠" if gap > 0.2 else ""
+                print(f"  {i:<7} | {treat:<10} | {r2:<17}")
+        else:
+            print(f"\n  {'Cluster':<7} | {'Treatment':<10} | {'R² Train':<8} | {'R² Test':<8} | {'MAPE Tr':<8} | {'MAPE Te':<8} | {'WAPE Tr':<8} | {'WAPE Te':<8}")
+            print("  " + "-" * 80)
 
-            print(f"  {i:<7} | {treat:<10} | {r2_tr:<8} | {r2_te:<8} | {mape_tr:<8} | {mape_te:<8} | {wape_tr:<8} | {wape_te:<8}{flag}")
+            for i, row in cv_summary.iterrows():
+                treat = ", ".join(row["treatment"]) if isinstance(row["treatment"], list) else str(row["treatment"])
+                if len(treat) > 10:
+                    treat = treat[:7] + "..."
+
+                r2_tr = f"{row['r2_train']:.4f}"
+                r2_te = f"{row['r2_test']:.4f}"
+                mape_tr = f"{row['mape_train']:.4f}"
+                mape_te = f"{row['mape_test']:.4f}"
+                wape_tr = f"{row['wape_train']:.4f}"
+                wape_te = f"{row['wape_test']:.4f}"
+
+                # Flag overfitting
+                gap = row['r2_train'] - row['r2_test']
+                flag = " ⚠" if gap > 0.2 else ""
+
+                print(f"  {i:<7} | {treat:<10} | {r2_tr:<8} | {r2_te:<8} | {mape_tr:<8} | {mape_te:<8} | {wape_tr:<8} | {wape_te:<8}{flag}")
 
     print()
 
@@ -992,7 +1150,8 @@ def _build_comparison(scenarios, mde, experiment_days):
         if mde is None:
             # Auto-MDE mode
             curve = s["duration"]["consolidated"].get("mde_curve")
-            for d in [21, 30, 60]:
+            days_to_eval = experiment_days if experiment_days else [21, 30, 60]
+            for d in days_to_eval:
                 if curve is not None:
                     val = curve.loc[curve["days"] == d, "mde"]
                     row[f"mde_{d}d"] = f"{val.values[0]*100:.2f}%" if len(val) > 0 else "N/A"
@@ -1010,8 +1169,8 @@ def _build_comparison(scenarios, mde, experiment_days):
     return pd.DataFrame(rows)
 
 
-def _print_comparison_table(comparison_df, mde):
-    """Print the final comparison table across scenarios."""
+def _print_comparison_table(comparison_df, mde, experiment_days=None):
+    """Print the final consolidated comparison cross-scenario."""
     if comparison_df.empty:
         print("\n  No valid scenarios found to compare.")
         return
@@ -1023,17 +1182,23 @@ def _print_comparison_table(comparison_df, mde):
     
     is_auto = mde is None
     if is_auto:
-        header = f"  {'Scenario':<8} | {'% Treated':<10} | {'Clusters':<8} | {'Distinct':<8} | {'σ Consol.':<10} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}"
+        days_to_print = experiment_days if experiment_days else [21, 30, 60]
+        mde_cols = [f"MDE @{d}d" for d in days_to_print]
+        mde_hdr = " | ".join(f"{col:<9}" for col in mde_cols)
+        
+        header = f"  {'Scenario':<8} | {'% Treated':<10} | {'Clusters':<8} | {'Distinct':<8} | {mde_hdr}"
         print(header)
         print("  " + "-" * (len(header) - 2))
         for _, row in comparison_df.iterrows():
-            print(f"  {int(row['Scenario']):<8} | {row['% Treated']:<10} | {int(row['Clusters']):<8} | {int(row['Distinct']):<8} | {row['sigma']:<10.4f} | {row['mde_21d']:<9} | {row['mde_30d']:<9} | {row['mde_60d']:<9}")
+            mde_vals = [f"{row.get(f'mde_{d}d', 'N/A'):<9}" for d in days_to_print]
+            mde_row = " | ".join(mde_vals)
+            print(f"  {int(row['Scenario']):<8} | {row['% Treated']:<10} | {int(row['Clusters']):<8} | {int(row['Distinct']):<8} | {mde_row}")
     else:
-        header = f"  {'Scenario':<8} | {'% Treated':<10} | {'Clusters':<8} | {'Distinct':<8} | {'σ Consol.':<10} | {'Min Days':<10} | {'Power':<7}"
+        header = f"  {'Scenario':<8} | {'% Treated':<10} | {'Clusters':<8} | {'Distinct':<8} | {'Min Days':<10} | {'Power':<7}"
         print(header)
         print("  " + "-" * (len(header) - 2))
         for _, row in comparison_df.iterrows():
-            print(f"  {int(row['Scenario']):<8} | {row['% Treated']:<10} | {int(row['Clusters']):<8} | {int(row['Distinct']):<8} | {row['sigma']:<10.4f} | {row['best_days']:<10} | {row['best_power']:<7}")
+            print(f"  {int(row['Scenario']):<8} | {row['% Treated']:<10} | {int(row['Clusters']):<8} | {int(row['Distinct']):<8} | {row['best_days']:<10} | {row['best_power']:<7}")
     
     print("\n" + "=" * 85)
 

@@ -30,8 +30,8 @@ def run_geo_experiment(
 
 Uma das maiores vantagens da `run_geo_experiment` é a capacidade de ler diretamente o objeto retornado pela função `design_of_experiments`. 
 
-- **`doe`**: Se você passar o dicionário retornado pelo DoE, a pipeline irá ignorar os parâmetros `geos`, `n_treatment` e `fixed_treatment`, utilizando exatamente os agrupamentos validados no planejamento.
-- **`scenario`**: Índice do cenário escolhido (ex: 1 para 10% de tratamento, 2 para 20%, etc.).
+- **`doe`**: Se você passar o dicionário retornado pelo DoE, a pipeline irá herdar tanto a modalidade analítica (Controle Sintético vs. Matched DiD) quanto ignorar os parâmetros `geos`, `n_treatment` e `fixed_treatment`, utilizando exatamente os agrupamentos validados no planejamento.
+- **`scenario`**: Índice do cenário escolhido dentro do dicionário `doe` (ex: 1 para o cenário com 10% de tratamento, 2 para 20%, etc.).
 
 ## Janelas de Análise
 
@@ -42,9 +42,9 @@ Uma das maiores vantagens da `run_geo_experiment` é a capacidade de ler diretam
 
 1. **Descoberta/Recuperação de Clusters**: Recupera do DoE ou descobre via ElasticNet os melhores controles sintéticos.
 2. **Validação Cruzada (`validate_geo_clusters`)**: Atesta a robustez histórica das séries.
-3. **Poder Estatístico (`estimate_duration`)**: Valida se o teste tem fôlego para detectar o MDE.
-4. **Controle Sintético (`run_synthetic_control`)**: Calcula o Lift Absoluto e Percentual com intervalos de confiança via **Bootstrap**.
-5. **Placebo Robusto (`run_placebo_tests`)**: Aplica a metodologia de **Razão MSPE** para garantir que o efeito é único da região tratada.
+3. **Poder Estatístico (`estimate_duration`)**: Valida se o teste final (agora com prazo determinado) tem real significância sobre os dados obtidos.
+4. **Cálculo Causal**: Dependendo da metodologia herdada do DoE, ativa o `run_synthetic_control` (Otimização Convexa) ou o `run_matched_did` (Diferenças em Diferenças). Calcula o Lift Absoluto e Percentual com intervalos de confiança via **Pooled Bootstrap**.
+5. **Placebo Robusto (`run_placebo_tests`)**: Aplica testes exatos de permutação sobre os controles para calcular a **Razão MSPE** e atestar que a quebra de tendência é singular e não um efeito cíclico do mercado. Mantém total coerência metodológica espelhando o método de cálculo do Passo 4.
 6. **Diagnósticos Visuais**: Renderiza gráficos de séries temporais, lift acumulado e distribuição de placebo.
 
 ## Retorno (*Output*)

@@ -18,7 +18,8 @@ def run_placebo_tests(
     random_state=None,
     cluster_idx=None,
     plot=True,
-    verbose=True
+    verbose=True,
+    experiment_type="synthetic_control"
 ) -> dict:
     """
     Run placebo tests comparing the MSPE Ratio (Post/Pre) of the observed
@@ -38,19 +39,35 @@ def run_placebo_tests(
         placebo_controls = [g for g in control_geos if g != placebo_geo]
 
         try:
-            result = run_synthetic_control(
-                filepath=filepath,
-                date_col=date_col,
-                treatment_geo=placebo_geo,
-                control_geos=placebo_controls,
-                treatment_start_date=treatment_start_date,
-                treatment_end_date=treatment_end_date,
-                start_date=start_date,
-                end_date=end_date,
-                random_state=random_state,
-                plot=False,
-                verbose=False
-            )
+            if experiment_type == "matched_did":
+                from .did import run_matched_did
+                result = run_matched_did(
+                    filepath=filepath,
+                    date_col=date_col,
+                    treatment_geo=[placebo_geo],
+                    control_geos=placebo_controls,
+                    treatment_start_date=treatment_start_date,
+                    treatment_end_date=treatment_end_date,
+                    start_date=start_date,
+                    end_date=end_date,
+                    random_state=random_state,
+                    plot=False,
+                    verbose=False
+                )
+            else:
+                result = run_synthetic_control(
+                    filepath=filepath,
+                    date_col=date_col,
+                    treatment_geo=placebo_geo,
+                    control_geos=placebo_controls,
+                    treatment_start_date=treatment_start_date,
+                    treatment_end_date=treatment_end_date,
+                    start_date=start_date,
+                    end_date=end_date,
+                    random_state=random_state,
+                    plot=False,
+                    verbose=False
+                )
             # Use MSPE Ratio: Post-MSPE / Pre-MSPE
             p_ratio = result["post_mspe"] / result["pre_mspe"] if result["pre_mspe"] > 0 else 0
             placebo_ratios.append(p_ratio)

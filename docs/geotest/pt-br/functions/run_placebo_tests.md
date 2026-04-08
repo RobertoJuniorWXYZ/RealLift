@@ -15,20 +15,23 @@ def run_placebo_tests(
     random_state: int = None,
     cluster_idx: int = None,
     plot: bool = True,
-    verbose: bool = True
+    verbose: bool = True,
+    experiment_type: str = "synthetic_control"
 ) -> dict
 ```
 
 ## Mecânica de Razão MSPE (Post/Pre)
 
-Em vez de comparar apenas o Lift absoluto, o RealLift adota a metodologia de **Razão MSPE (Mean Squared Prediction Error)**, conforme proposto por Abadie et al. (2010). Esta abordagem é superior pois normaliza o erro do período de intervenção pelo erro de ajuste histórico (pré-teste) de cada geo:
+Em vez de comparar apenas o Lift absoluto, o RealLift adota a metodologia de **Razão MSPE (Mean Squared Prediction Error)**, conforme proposto por Abadie et al. (2010). Esta abordagem é superior pois normaliza o erro do período de intervenção pelo erro de ajuste histórico (pré-teste) daquela geo específica.
 
-1.  **Iteração Placebo**: Para cada geo no pool de controle, o modelo tenta criar um controle sintético para ela, tratando-a como se fosse o alvo do experimento.
+*Nota Estrutural importante: A função de placebo herda a rigorosidade do modelo selecionado (parâmetro `experiment_type`). Se você operou um painel de Diferenças-em-Diferenças (`matched_did`) a função placebo garantirá que as simulações falsas obedeçam a restrição de pesos uniformes 1/N. Caso o modelo mestre tenha sido Controle Sintético (`synthetic_control`), o placebo usará pesos otimizados via Convexidade.*
+
+1.  **Iteração Placebo**: Para cada geo no pool de controle, o modelo tenta criar a simulação de controle exata que usaria no passo avaliado, tratando a geo isolada como se fosse o alvo irreal de uma campanha publicitária.
 2.  **Cálculo da Razão**: Para cada teste (incluindo o real), calculamos:
     $$
     Ratio = \frac{MSPE_{Post}}{MSPE_{Pre}}
     $$
-3.  **Vantagem**: Se uma cidade é naturalmente ruidosa e o modelo não encaixou bem no pré-teste ($MSPE_{Pre}$ alto), um desvio alto no pós-teste não será considerado tão "anormal". Por outro lado, se o encaixe foi perfeito e houve um desvio súbito após a data da campanha, a Razão será altíssima, indicando um efeito único.
+3.  **Vantagem Crítica (Proteção contra Dados Voláteis)**: O uso da razão nos protege em cenários modernos de dados e de *Matched DiD* sujos. Caso uma localidade placebo do passado já operasse sob forte ruído natural e a predição da tendência não fosse excelente ($MSPE_{Pre}$ alto), um desvio alto no pós-teste seria minimizado em sua divisão, não estritamente considerado tão "excepcional". Por outro lado, caso presenciassemos uma tendência estática (pré-teste perto de zero), o erro mínimo do MSPE dispararia a Razão ao identificar as quebras. Isso efetivamente impede falsos positivos punindo localidades ruidosas.
 
 ### Densidade Probabilística (Empirical p-value formulation)
 

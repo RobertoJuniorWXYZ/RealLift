@@ -9,6 +9,7 @@ def estimate_duration(
     date_col,
     treatment_geo=None,
     control_geos=None,
+    control_weights=None,
     clusters=None,
     mde=DEFAULT_MDE,
     alpha=DEFAULT_ALPHA_TEST,
@@ -72,7 +73,8 @@ def estimate_duration(
                 filepath=filepath,
                 date_col=date_col,
                 treatment_geo=treat,
-                control_geos=cluster["control"],
+                control_geos=cluster["control"].copy(),
+                control_weights=cluster.get("control_weights", []).copy(),
                 mde=mde,
                 alpha=alpha,
                 power_target=power_target,
@@ -228,12 +230,18 @@ def estimate_duration(
         y = df_transformed[treatment_geo].values
         X = df_transformed[control_geos].values
 
-    model = LinearRegression()
-    model.fit(X, y)
+    if control_weights is not None and len(control_weights) == X.shape[1]:
+        y_pred = X @ np.array(control_weights)
+        std_residual_reg = (y - y_pred).std()
+        r_squared = float(np.corrcoef(y, y_pred)[0, 1])**2 if np.std(y) > 0 and np.std(y_pred) > 0 else 0.0
+    else:
+        model = LinearRegression()
+        model.fit(X, y)
+        y_pred = model.predict(X)
+        std_residual_reg = (y - y_pred).std()
+        r_squared = model.score(X, y)
 
-    y_pred = model.predict(X)
     residual_reg = y - y_pred
-    std_residual_reg = residual_reg.std()
 
     return _compute_and_report(
         mde=mde,
@@ -255,7 +263,7 @@ def estimate_duration(
             "std_naive": std_naive,
             "std_residual_simple": std_residual_simple,
             "std_residual_regression": std_residual_reg,
-            "r_squared": model.score(X, y),
+            "r_squared": r_squared,
             "correlation": corr,
         },
         residuals=pd.Series(residual_reg)

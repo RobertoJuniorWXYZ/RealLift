@@ -17,6 +17,7 @@ def design_of_experiments(
     experiment_days: int | list = [21, 60],
     n_folds: int = 5,
     search_mode: str = "ranking",
+    experiment_type: str = "synthetic_control",
     verbose: bool = True
 ) -> dict
 ```
@@ -25,8 +26,8 @@ def design_of_experiments(
 
 Para embasar a viabilidade do teste, a pipeline processa metadados pré-intervenção orquestrando três pilares:
 
-1. **Agrupamento Ótimo (`discover_geo_clusters`)**: Identifica as melhores combinações de geos para tratamento e controle, minimizando o erro sintético histórico.
-2. **Avaliação Pragmática (`validate_geo_clusters`)**: Executa Cross-Validation (Backtesting) em janelas rolantes para garantir que o modelo de controle sintético seja estável.
+1. **Agrupamento Ótimo (`discover_geo_clusters`)**: Identifica as melhores combinações de geos para tratamento e controle. No modo `synthetic_control`, utiliza otimização convexa ElasticNet. No modo `matched_did`, agrupa baseando-se unicamente na métrica de correlação média sob pesos idênticos (1/N).
+2. **Avaliação Pragmática (`validate_geo_clusters`)**: Executa Cross-Validation (Backtesting) em janelas rolantes para garantir a estabilidade holística.
 3. **Cálculo de Requisitos (`estimate_duration`)**: Projeta o MDE (Efeito Mínimo Detectável) para diferentes durações (ex: 21, 30, 60 dias), permitindo escolher o cenário com melhor custo-benefício.
 
 ## Relatório Técnico (*Verbosity*)
@@ -44,9 +45,12 @@ O dicionário retornado aglutina as inferências de todos os cenários testados:
 
 ```python
 {
+    "experiment_type": "synthetic_control",
     "scenarios": [
         {
             "pct_treatment": 0.10,
+            "n_treatment": 3,
+            "treatment_pool": ["geo_A", "geo_B", "geo_C"], # Lista agregada de todos os tratamentos
             "clusters": [...],      # Agrupamentos encontrados
             "duration": {...},      # Curva de MDE e Power
             "validation": pd.DataFrame # Resultados de Backtesting (R2, MAPE)

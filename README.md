@@ -30,39 +30,84 @@ pip install reallift
 
 ## Quick Start Guide
 
-### 1. Planning (Pre-Test Phase)
-Use the DoE pipeline to project the duration strictly necessary to capture a target Minimum Detectable Effect (MDE).
+This end-to-end example demonstrates how to simulate geographic data, plan the optimal experiment design, inject a simulated marketing effect, and precisely measure the impact.
+
+### 1. Generate Historical Data
+Simulate daily performance for 27 candidate geos over a 90-day baseline.
 
 ```python
-from reallift.pipelines import design_of_experiments
+from reallift import generate_geo_data
 
-# Project requirements and identify optimal clusters
-doe_result = design_of_experiments(
-    filepath="historical_data.csv",
-    date_col="date",
-    pct_treatment=0.10,      # Test a scenario with 10% of the market treated
-    mde=0.015,               # Target 1.5% incremental lift
-    experiment_days=[21, 60] # Evaluation window between 21 and 60 days
+geo_data = generate_geo_data(
+    start_date="2025-01-01",
+    end_date="2025-03-31",
+    n_geos=27,
+    pre_only=True,
+    trend_slope=0.01,
+    seasonality_amplitude=3,
+    seasonality_period=7,
+    noise_std=[1, 1.5],
+    base_value=[50, 100],
+    random_seed=42,
+    save_csv=True,
+    pre_file_name="demo_geodata_pre_test.csv"
 )
 ```
 
-### 2. Impact Analysis (Post-Test Phase)
-Execute the complete analytical pipeline after or during the intervention.
+### 2. Design the Experiment (Pre-Test Phase)
+Use the DoE pipeline to rigorously select the best treatment and control geometries based on historical correlations.
 
 ```python
-from reallift.pipelines import run_geo_experiment
+from reallift import design_of_experiments
 
-# Complete end-to-end analytical pipeline
-result = run_geo_experiment(
-    filepath="experiment_data.csv",
+doe = design_of_experiments(
+    filepath="demo_geodata_pre_test.csv",
     date_col="date",
-    treatment_start_date="2025-05-01",
-    doe=doe_result,          # Inherit validated clusters from DoE
-    scenario=0               # Use the 10% treatment scenario
+    start_date="2025-01-01",
+    end_date="2025-03-31",
+    pct_treatment=None,
+    fixed_treatment=None,
+    experiment_days=[21, 28, 30, 35, 60]
 )
+```
 
-# Extract total documented incremental impact
-print(f"Total Cumulative Lift: {result['results'][0]['synthetic']['lift_total']:.2f}")
+### 3. Inject Simulated Marketing Campaign
+Simulate a 21-day campaign with an artificial lift applied strictly to the optimal treatment geos assigned in the DoE.
+
+```python
+from reallift import generate_simulated_intervention
+
+geo_data_intervention = generate_simulated_intervention(
+    filepath="demo_geodata_pre_test.csv",
+    days=21,
+    treatment_geos=doe['scenarios'][1]['treatment_pool'],
+    lift=[0.05, 0.10],
+    trend_slope=0.01,
+    seasonality_amplitude=3,
+    seasonality_period=7,
+    noise_std=[1, 1.5],
+    random_seed=42,
+    save_csv=True,
+    as_integer=True,
+    file_name="demo_geodata_post_test.csv"
+)
+```
+
+### 4. Evaluate Incremental Impact (Post-Test Phase)
+Measure the precise financial and percentual lift utilizing the Causal Inference engine against the final dataset.
+
+```python
+from reallift import run_geo_experiment
+
+results = run_geo_experiment(
+    filepath="demo_geodata_post_test.csv",
+    date_col="date",
+    treatment_start_date="2025-04-01",
+    treatment_end_date="2025-04-22",
+    doe=doe, 
+    scenario=1,
+    plot=False
+)
 ```
 
 ---

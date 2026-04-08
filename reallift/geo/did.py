@@ -1,11 +1,10 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import cvxpy as cp
 from scipy import stats
 from ..geo.bootstrap import bootstrap_significance
 
-def run_synthetic_control(
+def run_matched_did(
     filepath,
     date_col,
     treatment_geo,
@@ -20,24 +19,9 @@ def run_synthetic_control(
     verbose=True
 ) -> dict:
     """
-    Run synthetic control analysis.
-
-    Parameters:
-        filepath (str): Path to CSV file.
-        date_col (str): Date column name.
-        treatment_geo (str or list): Treatment geography or list of geographies.
-        control_geos (list): Control geographies.
-        treatment_start_date (str): Treatment start date, separating pre-test and post-test periods.
-        treatment_end_date (str): Treatment end date (analysis window end).
-        start_date (str): YYYY-MM-DD date when analysis begins (optional).
-        end_date (str): YYYY-MM-DD date when analysis ends (optional).
-        random_state (int or np.random.Generator): Random state for reproducible permutations.
-        cluster_idx (int or str): Optional cluster index for logging traceability.
-        plot (bool): Whether to plot the baseline graph.
-        verbose (bool): Whether to print verbose logging results.
-
-    Returns:
-        dict: Synthetic control result.
+    Run Matched Differences-in-Differences (DiD) analysis.
+    This module strictly uses uniform weighting across the donor pool 
+    without convex optimization, adhering to classic parallel-trends properties.
     """
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
@@ -82,23 +66,9 @@ def run_synthetic_control(
     y_norm = y / y_mean
     X_norm = X / X_mean
 
-    X_pre = np.nan_to_num(X_norm[:treatment_idx])
-    y_pre = np.nan_to_num(y_norm[:treatment_idx])
-
-    w = cp.Variable(len(control_geos))
-    alpha = cp.Variable()
-
-    objective = cp.Minimize(cp.sum_squares(y_pre - (X_pre @ w + alpha)))
-    constraints = [w >= 0, cp.sum(w) == 1]
-
-    problem = cp.Problem(objective, constraints)
-    problem.solve(solver=cp.SCS, verbose=False)
-
-    if problem.status not in ["optimal", "optimal_inaccurate"]:
-        raise ValueError(f"Solver failed: {problem.status}")
-
-    weights = np.array(w.value).flatten()
-    alpha_val = float(alpha.value)
+    # Enforce DiD axiomatic uniform weights (no ElasticNet)
+    weights = np.array([1.0 / len(control_geos)] * len(control_geos))
+    alpha_val = 0.0
 
     synthetic_norm = X_norm @ weights + alpha_val
     synthetic = synthetic_norm * y_mean
@@ -141,14 +111,10 @@ def run_synthetic_control(
         boot_result = bootstrap_significance(effect, post_synth, random_state=random_state)
 
     if verbose:
-        header = "=== GEO SYNTHETIC CONTROL ==="
+        header = "=== GEO MATCHED DID ==="
         if cluster_idx is not None:
-            header = f"=== GEO SYNTHETIC CONTROL (Cluster {cluster_idx}) ==="
+            header = f"=== GEO MATCHED DID (Cluster {cluster_idx}) ==="
         print(f"\n{header}")
-        print("\nWeights:")
-        for geo, w_val in zip(control_geos, weights):
-            if w_val > 0.001:
-                print(f"{geo}: {w_val:.4f}")
 
         print("\nTreatment period:")
         start_date_str = df[date_col].iloc[treatment_idx].strftime('%Y-%m-%d')
@@ -188,7 +154,7 @@ def run_synthetic_control(
             print("⚠️ Lift NOT significant (CI crosses 0)")
 
     if plot:
-        plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result)
+        plot_matched_did(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result)
 
     return {
         "weights": dict(zip(control_geos, weights)),
@@ -214,19 +180,18 @@ def run_synthetic_control(
         }
     }
 
-def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result):
+def plot_matched_did(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result):
     """
-    Generate plots for synthetic control analysis.
+    Generate plots for Matched DiD analysis.
     """
-    date_col = df.columns[0] # Assuming first col is date as per common usage
-    
+    date_col = df.columns[0]
     geo_name = ", ".join(treatment_geo) if isinstance(treatment_geo, list) else treatment_geo
 
     plt.figure(figsize=(14,5))
     plt.plot(df[date_col], y, label=f"{geo_name} Real")
-    plt.plot(df[date_col], synthetic, label="Synthetic", linestyle="--")
+    plt.plot(df[date_col], synthetic, label="Matched Baseline", linestyle="--")
     plt.axvline(df[date_col].iloc[treatment_idx], linestyle=":", color="black", label="Treatment Start")
-    plt.title(f"GeoLift - Synthetic Control ({geo_name})")
+    plt.title(f"GeoLift - Matched DiD ({geo_name})")
     plt.xlabel("Date")
     plt.ylabel("Value")
     plt.legend()
@@ -238,7 +203,7 @@ def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effec
     plt.figure(figsize=(14,4))
     plt.plot(df[date_col].iloc[treatment_idx:], effect, label="Daily lift")
     plt.axhline(0, linestyle="--")
-    plt.title("Lift (Treatment - Synthetic)")
+    plt.title("Lift (Treatment - Matched Baseline)")
     plt.xlabel("Date")
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.xticks(rotation=45)
@@ -248,7 +213,7 @@ def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effec
     baseline = post_synth.mean()
     observed = post_real.mean()
     plt.figure(figsize=(6,5))
-    plt.bar(["Synthetic", "Real"], [baseline, observed])
+    plt.bar(["Matched Baseline", "Real"], [baseline, observed])
     plt.title("Average Outcome (Post Period)")
     plt.ylabel("Value")
     plt.show()

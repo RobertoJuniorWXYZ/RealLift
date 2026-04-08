@@ -20,7 +20,8 @@ def validate_geo_clusters(
     export_csv=False,
     output_prefix="geo_validation",
     cluster_idx=None,
-    verbose=True
+    verbose=True,
+    force_equal_weights=False
 ) -> dict:
     """
     Validate geo groups using train/test split or Time Series Cross-Validation.
@@ -111,19 +112,23 @@ def validate_geo_clusters(
             y_norm = y_train / y_mean
             X_norm = X_train / X_mean
 
-            w = cp.Variable(X_train.shape[1])
-            alpha_intercept = cp.Variable()
-
-            obj = cp.Minimize(cp.sum_squares(y_norm - (X_norm @ w + alpha_intercept)))
-            cons = [w >= 0, cp.sum(w) == 1]
-            prob = cp.Problem(obj, cons)
-            try:
-                prob.solve(solver=cp.SCS, verbose=False)
-                weights = np.array(w.value).flatten()
-                intercept_val = float(alpha_intercept.value)
-            except:
+            if force_equal_weights:
                 weights = np.ones(X_train.shape[1]) / X_train.shape[1]
                 intercept_val = 0.0
+            else:
+                w = cp.Variable(X_train.shape[1])
+                alpha_intercept = cp.Variable()
+
+                obj = cp.Minimize(cp.sum_squares(y_norm - (X_norm @ w + alpha_intercept)))
+                cons = [w >= 0, cp.sum(w) == 1]
+                prob = cp.Problem(obj, cons)
+                try:
+                    prob.solve(solver=cp.SCS, verbose=False)
+                    weights = np.array(w.value).flatten()
+                    intercept_val = float(alpha_intercept.value)
+                except:
+                    weights = np.ones(X_train.shape[1]) / X_train.shape[1]
+                    intercept_val = 0.0
 
             X_test_norm = X_test / X_mean
             y_pred_norm_test = X_test_norm @ weights + intercept_val

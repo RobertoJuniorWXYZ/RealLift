@@ -8,7 +8,7 @@ from .geo import (
     bootstrap_significance,
     run_placebo_tests
 )
-from .pipelines.geo_pipeline import run_geo_experiment, run_geo_requirements, design_of_experiments
+from .pipelines.geo_pipeline import run_geo_experiment, design_of_experiments
 from .simulation import generate_geo_data, generate_simulated_intervention
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

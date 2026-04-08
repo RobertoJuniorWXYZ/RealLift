@@ -36,7 +36,7 @@ O comportamento de busca muda dependendo de como a função é chamada:
 Para evitar que o modelo seja enganado por tendências de longo prazo ou distorções de escala, aplica-se uma transformação de log e diferença. Assim, o modelo foca em alinhar a volatilidade e o *crescimento relativo dia após dia*, tornando a série estacionária.
 
 ### 4. Filtrando a "Multidão" (ElasticNet)
-Com muitas cidades no controle, comparar todas geraria ruído (*overfitting*). A função utiliza um modelo de regressão **ElasticNet** que avalia os doadores e naturalmente "zera" a relevância das cidades que não ajudam a explicar o tratamento. 
+Com muitas cidades no controle, comparar todas no modo Contingente geraria muito ruído estocástico (*overfitting*). A função utiliza um algoritmo de regressão penalizada **ElasticNet** que avalia simultaneamente dezenas de doadores e naturalmente "zera" a relevância escalar das cidades que não ajudam na linearidade de aproximação do Tratamento. 
 
 *Fórmula da Otimização ElasticNet minimizada:*
 
@@ -44,7 +44,9 @@ $$
 \min_{w} \frac{1}{2n} ||Xw - y||^2_2 + \alpha \cdot L1_{ratio} \cdot ||w||_1 + 0.5 \cdot \alpha \cdot (1 - L1_{ratio}) \cdot ||w||_2^2
 $$
 
-**A Regra do Positivo:** Se uma cidade candidata recebe um peso negativo (ou seja, ela cresce quando o alvo cai), ela é permanentemente descartada. Controles sintéticos exigem similaridade real, e não correlações espelhadas irreais.
+**A Regra do Positivo:** Se uma cidade candidata recebe um peso negativo (ou seja, ela cresce isoladamente quando o alvo principal cai), o vetor a descarta. Controles exigem similaridade real vetorial, e não correlações espelhadas bizarras. 
+
+*(Obs: Quando acionado através do parâmetro `use_elasticnet=False` nos bastidores puristas do DiD, o algoritmo intercede para criar controles sob restrição fixa puramente baseado na correlação vetorial holística [1/N], evitando penalização convexa).*
 
 ### 5. Otimizando os Pesos (O Controle Sintético Real)
 As cidades que sobrevivem ao filtro anterior passam por uma otimização matemática rigorosa (via `cvxpy`) baseada nos dados originais. O objetivo é encontrar os **pesos percentuais** perfeitos que:
