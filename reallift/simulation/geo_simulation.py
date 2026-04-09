@@ -157,16 +157,109 @@ def generate_geo_data(
 
     return df, df_pre, treatment_geos
 
+
+def _estimate_series_params(t, y, n_components=3):
+    """
+    Estimate trend, multiple seasonality components, and noise parameters 
+    via FFT-guided OLS regression. This solves the 'spectral leakage' 
+    issue where off-bin frequencies pollute the noise estimate.
+    """
+    N = len(y)
+    if N < 4:
+        # Fallback for very short series
+        slope, intercept = np.polyfit(t, y, 1) if N > 1 else (0, y[0])
+        return {'trend_slope': float(slope), 'intercept': float(intercept), 
+                'seasonality_components': [], 'noise_std': 0.0}
+
+    # 1. Detrend for frequency discovery
+    slope_init, intercept_init = np.polyfit(t, y, 1)
+    y_dt = y - (slope_init * t + intercept_init)
+
+    # 2. Discover peaks via FFT
+    fft_vals = np.fft.rfft(y_dt)
+    freqs = np.fft.rfftfreq(N, d=1.0)
+    mags = np.abs(fft_vals)
+    mags[0] = 0 # ignore DC
+    
+    found_freqs = []
+    m_copy = mags.copy()
+    for _ in range(n_components):
+        idx = np.argmax(m_copy)
+        if m_copy[idx] <= 0: break
+        
+        # Parabolic interpolation for sub-bin frequency refinement
+        if 0 < idx < len(mags) - 1:
+            y0, y1, y2 = np.log(m_copy[idx-1] + 1e-9), np.log(m_copy[idx] + 1e-9), np.log(m_copy[idx+1] + 1e-9)
+            p = 0.5 * (y0 - y2) / (y0 - 2*y1 + y2)
+            refined_idx = idx + p
+            refined_f = refined_idx / N
+        else:
+            refined_f = freqs[idx]
+            
+        if refined_f > 0:
+            found_freqs.append(refined_f)
+            
+        # Zero neighbors
+        m_copy[max(0, idx-1):min(len(m_copy), idx+2)] = 0
+
+    # 3. Solve for exact parameters using OLS
+    # Model: y = a*t + b + sum(A_i*cos(2pi*f_i*t) + B_i*sin(2pi*f_i*t))
+    # We build the matrix X
+    X = np.column_stack([t, np.ones(N)])
+    for f in found_freqs:
+        X = np.column_stack([X, np.cos(2*np.pi*f*t), np.sin(2*np.pi*f*t)])
+    
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        
+        final_slope = coeffs[0]
+        final_intercept = coeffs[1]
+        
+        components = []
+        for i, f in enumerate(found_freqs):
+            A = coeffs[2 + 2*i]
+            B = coeffs[3 + 2*i]
+            # Convert A*cos + B*sin back to R*cos(wt + phase)
+            # A*cos(wt) + B*sin(wt) = Magn * cos(wt - phase)
+            # where Magn = sqrt(A^2 + B^2) and phase = atan2(B, A)
+            amplitude = np.sqrt(A**2 + B**2)
+            phase = -np.arctan2(B, A)
+            components.append({
+                'period': 1.0/f,
+                'amplitude': float(amplitude),
+                'phase': float(phase)
+            })
+            
+        y_pred = X @ coeffs
+        residuals = y - y_pred
+        noise_std = float(np.std(residuals))
+        
+        return {
+            'trend_slope': float(final_slope),
+            'intercept': float(final_intercept),
+            'seasonality_components': components,
+            'noise_std': noise_std
+        }
+    except:
+        # Fallback to init params
+        return {
+            'trend_slope': float(slope_init),
+            'intercept': float(intercept_init),
+            'seasonality_components': [],
+            'noise_std': float(np.std(y_dt))
+        }
+
+
 def generate_simulated_intervention(
     filepath,
     days,
     treatment_geos,
     lift=0.05,
     date_col="date",
-    trend_slope=0.05,
-    seasonality_amplitude=10,
-    seasonality_period=7,
-    noise_std=2,
+    trend_slope=None,
+    seasonality_amplitude=None,
+    seasonality_period=None,
+    noise_std=None,
     random_seed=42,
     plot=True,
     save_csv=False,
@@ -175,7 +268,12 @@ def generate_simulated_intervention(
 ) -> pd.DataFrame:
     """
     Generate a simulated post-intervention period by extending an existing CSV dataset.
-    Maintains continuity of trend, seasonality, and noise.
+    Automatically infers trend, seasonality, and noise characteristics from the
+    pre-test data for each geography via linear regression and FFT analysis.
+
+    When parameters are left as None (default), each geography gets its own
+    estimated parameters, producing a natural continuation of the historical series.
+    Explicit values override auto-inference for all geographies (backward compatible).
 
     Parameters:
         filepath (str): Path to pre-test CSV file.
@@ -183,10 +281,10 @@ def generate_simulated_intervention(
         treatment_geos (list): Geographies to receive the lift.
         lift (float or list): Lift amount (constant or random range [min, max]).
         date_col (str): Column name for dates.
-        trend_slope (float): Trend slope (should match pre-test).
-        seasonality_amplitude (float): Seasonality amplitude (should match pre-test).
-        seasonality_period (int): Seasonality period (should match pre-test).
-        noise_std (float): Noise standard deviation (should match pre-test).
+        trend_slope (float or None): Trend slope. If None, auto-inferred per geography.
+        seasonality_amplitude (float or None): Seasonality amplitude. If None, auto-inferred via FFT.
+        seasonality_period (float or None): Seasonality period in days. If None, auto-inferred via FFT.
+        noise_std (float or None): Noise standard deviation. If None, auto-inferred from residuals.
         random_seed (int): Random seed for the new noise.
         plot (bool): Whether to plot the full combined series.
         save_csv (bool): Whether to save the full result to a CSV file.
@@ -214,33 +312,66 @@ def generate_simulated_intervention(
     df_post = pd.DataFrame({date_col: new_dates})
     
     np.random.seed(random_seed)
+    t_pre = np.arange(n_pre)
 
     for geo_name in geos:
-        # Base Simulation (extension of structure)
-        trend = trend_slope * t_post
-        seasonality = seasonality_amplitude * np.sin(2 * np.pi * t_post / seasonality_period)
+        y_pre = df_pre[geo_name].values.astype(float)
 
-        if isinstance(noise_std, (list, tuple)) and len(noise_std) == 2:
-            current_noise = np.random.uniform(noise_std[0], noise_std[1])
+        # --- Parameter Estimation (auto-infer from pre-test data) ---
+        params = _estimate_series_params(t_pre, y_pre)
+        
+        # Determine components to use
+        # If manual overrides exist, we use a single component logic
+        if seasonality_period is not None or seasonality_amplitude is not None:
+            geo_period = params['seasonality_components'][0]['period'] if seasonality_period is None else seasonality_period
+            geo_amplitude = params['seasonality_components'][0]['amplitude'] if seasonality_amplitude is None else seasonality_amplitude
+            geo_phase = -np.pi / 2 if (seasonality_period is not None or seasonality_amplitude is not None) else params['seasonality_components'][0]['phase']
+            
+            use_components = [{
+                'period': geo_period,
+                'amplitude': geo_amplitude,
+                'phase': geo_phase
+            }]
         else:
-            current_noise = noise_std
-        noise = np.random.normal(0, current_noise, len(t_post))
+            use_components = params['seasonality_components']
 
-        # We must align the baseline level. 
-        # For simplicity, we assume the trend/seasonality/base were part of the original.
-        # But we don't know the 'base_value' of the original data.
-        # So we align the simulation based on the LAST observed value but keeping the trend.
-        # Actually, using the same trend/seasonality formula with incremental 't' preserves phase.
-        # But we need an offset to match the absolute values of the df_pre.
-        
-        # Calculate what the formula predicts for the last day of pre-period
-        t_last = n_pre - 1
-        last_trend = trend_slope * t_last
-        last_seasonality = seasonality_amplitude * np.sin(2 * np.pi * t_last / seasonality_period)
-        
-        offset = df_pre[geo_name].iloc[-1] - (last_trend + last_seasonality)
+        # Intercept and Trend
+        geo_slope = params['trend_slope'] if trend_slope is None else trend_slope
+        if trend_slope is None:
+            geo_intercept = params['intercept']
+        else:
+            # Re-calculate intercept based on manual slope to preserve the end-point continuity as best as possible
+            t_last = n_pre - 1
+            last_trend_val = geo_slope * t_last
+            last_seas_val = sum(c['amplitude'] * np.cos(2 * np.pi * t_last / c['period'] + c['phase']) for c in use_components)
+            geo_intercept = y_pre[-1] - (last_trend_val + last_seas_val)
 
-        series = offset + trend + seasonality + noise
+        # Noise: use estimated or explicit
+        if noise_std is not None and (isinstance(noise_std, (int, float)) and noise_std == 0):
+            geo_noise_std = 0.0
+        elif noise_std is None:
+            geo_noise_std = params['noise_std']
+        elif isinstance(noise_std, (list, tuple)) and len(noise_std) == 2:
+            geo_noise_std = np.random.uniform(noise_std[0], noise_std[1])
+        else:
+            geo_noise_std = noise_std
+
+        # --- Generate Post Series ---
+        trend = geo_slope * t_post
+        
+        seasonality = np.zeros_like(t_post, dtype=float)
+        for comp in use_components:
+            seasonality += comp['amplitude'] * np.cos(2 * np.pi * t_post / comp['period'] + comp['phase'])
+            
+        noise = np.random.normal(0, geo_noise_std, len(t_post)) if geo_noise_std > 0 else np.zeros_like(t_post)
+
+        # Smooth transition: correct for model-data gap at the boundary
+        # Using the actual last pre-value vs what the sum of trend+seas+intercept predicts
+        last_predicted = (geo_slope * (n_pre - 1) + geo_intercept +
+                          sum(c['amplitude'] * np.cos(2 * np.pi * (n_pre - 1) / c['period'] + c['phase']) for c in use_components))
+        correction = y_pre[-1] - last_predicted
+
+        series = geo_intercept + trend + seasonality + noise + correction
 
         # Apply Lift
         if geo_name in treatment_geos:
@@ -248,7 +379,6 @@ def generate_simulated_intervention(
                 current_lift = np.random.uniform(lift[0], lift[1])
             else:
                 current_lift = lift
-            
             series = series * (1 + current_lift)
 
         if as_integer:

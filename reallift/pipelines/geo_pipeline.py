@@ -103,10 +103,10 @@ def run_geo_experiment(
             print(f"Treatment: {cluster['treatment']}")
             print(f"Final Exclusive Controls: {exclusive_controls}\n")
             
-            # Warn if we had to remove contaminated donors
+            # [Warning] if we had to remove contaminated donors
             removed = [g for g in cluster["control"] if g in global_treatments and g not in current_treatment]
             if removed:
-                print(f"⚠️  WARNING: Removed {len(removed)} contaminated donors from this cluster: {removed}")
+                print(f"[Warning] Removed {len(removed)} contaminated donors from this cluster: {removed}")
 
         # 3.1 Get Validation and Duration metrics (Reuse from DoE or run fresh)
         # ... (lines 94-131 unchanged)
@@ -275,58 +275,23 @@ def run_geo_experiment(
         n_clusters = len(results)
         num_treated = len(results[0]["cluster"]["treatment"])
         print(f"Clusters analyzed   : {n_clusters} ({num_treated} geo per treatment)")
-        print("-" * 70)
         
-        print("\n=== MODEL ROBUSTNESS (PRE-TREATMENT) ===\n")
-
-        is_auto_mde = results[0]["duration"]["summary"].get("auto_mde", False)
-        if is_auto_mde:
-            if is_did:
-                print(f"{'Cluster':<7} | {'Corr':<6} | {'R2':<7} | {'MAPE':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
-            else:
-                print(f"{'Cluster':<7} | {'Corr':<6} | {'OOF R2':<7} | {'MAPE':<6} | {'MDE @21d':<9} | {'MDE @30d':<9} | {'MDE @60d':<9}")
-            print("-" * 85)
-        else:
-            if is_did:
-                print(f"{'Cluster':<7} | {'Corr':<6} | {'R2':<7} | {'MAPE':<6} | {'MDE':<6} | {'Min Days':<10} | {'Power'}")
-            else:
-                print(f"{'Cluster':<7} | {'Corr':<6} | {'OOF R2':<7} | {'MAPE':<6} | {'MDE':<6} | {'Min Days':<10} | {'Power'}")
-            print("-" * 75)
+        # Compute MDE per cluster from pre-period residuals
+        from scipy.stats import norm as _norm
+        _z_alpha = _norm.ppf(1 - 0.05 / 2)  # alpha=0.05
+        _z_beta = _norm.ppf(0.80)            # power=80%
         
-        all_robust = True
-        for i, res in enumerate(results):
-            corr = res["duration"]["summary"].get("correlation", 0)
-            oof_r2 = res["validation"]["summary"].iloc[0]["r2_test"]
-            mape_val = res["validation"]["summary"].iloc[0]["mape_test"]
-
-            if oof_r2 <= 0.6: all_robust = False
-
-            if is_auto_mde:
-                mde_curve = res["duration"]["mde_curve"]
-                mdes = []
-                for d in [21, 30, 60]:
-                    val = mde_curve.loc[mde_curve["days"] == d, "mde"]
-                    mdes.append(f"{val.values[0]*100:.2f}%" if len(val) > 0 else "N/A")
-                print(f"{i:<7} | {corr:<6.3f} | {oof_r2:<7.4f} | {mape_val:<6.4f} | {mdes[0]:<9} | {mdes[1]:<9} | {mdes[2]:<9}")
-            else:
-                mde_val = res["duration"]["summary"]["mde"] * 100
-                best_days = res["duration"]["summary"]["best_days"]
-                best_power = res["duration"]["summary"]["best_power"]
-                days_str = f"{int(best_days)}d" if best_days else "N/A"
-                power_str = f"{best_power:.1%}" if best_power else "N/A"
-                print(f"{i:<7} | {corr:<6.3f} | {oof_r2:<7.4f} | {mape_val:<6.4f} | {mde_val:<5.2f}% | {days_str:<10} | {power_str}")
-            
-        if all_robust:
-            print("\n✔ Strong predictive performance across all clusters. Results are statistically reliable.")
-        else:
-            print("\n⚠️ Note: Some clusters show lower predictive robustness (R2 <= 0.6). Interpret with caution.")
-            
-        print("\n" + "-" * 125)
-        print(" CLUSTER-LEVEL INCREMENTAL IMPACT ".center(125, "-"))
-        print("-" * 125)
+        TABLE_W = 160
+        mde_col_label = f"MDE@{post_days}d" if post_len > 0 else "MDE"
+        print("\n" + "-" * TABLE_W)
+        print(" CLUSTER-LEVEL INCREMENTAL IMPACT ".center(TABLE_W, "-"))
+        print("-" * TABLE_W)
         synth_label = "Matched" if is_did else "Synthetic"
-        print(f"{'Cluster':<7} | {'Treatment':<10} | {'Observed':<10} | {synth_label:<10} | {'Lift (%)':<8} | {'Lift (abs)':<10} | {'CI 95% (%)':<18} | {'CI 95% (abs)':<18} | {'Sig'}")
-        print("-" * 125)
+        header = (f"{'Cluster':<8}| {'Treatment':<11}| {'Observed':<11}| {synth_label:<11}"
+                  f"| {'Lift (%)':<10}| {'Lift (abs)':<11}| {'CI 95% (%)':<20}| {'CI 95% (abs)':<20}"
+                  f"| {'Sig':<8}| {'Causal':<10}| {mde_col_label}")
+        print(header)
+        print("-" * TABLE_W)
         
         tot_lifts_abs = []
         tot_real_abs = []
@@ -350,11 +315,54 @@ def run_geo_experiment(
             ci_l_abs = syn["bootstrap"]["ci_lower_total_abs"]
             ci_u_abs = syn["bootstrap"]["ci_upper_total_abs"]
             
-            sig = "✔" if (ci_l_abs > 0 or ci_u_abs < 0) else " "
+            sig_flag = (ci_l_abs > 0 or ci_u_abs < 0)
+            placebo_p = res["placebo"]["p_value"]
+            causal_flag = placebo_p <= 0.10
+            
+            # MDE calculation — matching DoE methodology (log-diff regression with weights)
+            df_syn = syn["df"]
+            t_idx = syn["plotting_data"]["treatment_idx"]
+            treat_geos = res["cluster"]["treatment"]
+            ctrl_geos = list(syn["weights"].keys())
+            
+            try:
+                pre_data = df_syn.iloc[:t_idx].copy()
+                
+                # Build treatment series
+                if len(treat_geos) > 1:
+                    treat_series = pre_data[treat_geos].mean(axis=1)
+                else:
+                    treat_series = pre_data[treat_geos[0]]
+                
+                # Log-diff transformation (same as duration.py)
+                cols_for_log = pd.DataFrame({"_treat": treat_series.values}, index=pre_data.index)
+                for g in ctrl_geos:
+                    cols_for_log[g] = pre_data[g].values
+                
+                log_diff = np.log(cols_for_log).diff().dropna()
+                y_ld = log_diff["_treat"].values
+                X_ld = log_diff[ctrl_geos].values
+                
+                # Apply synthetic control weights (same as duration.py with control_weights)
+                w_vals = np.array([syn["weights"][g] for g in ctrl_geos])
+                y_pred_ld = X_ld @ w_vals
+                sigma = (y_ld - y_pred_ld).std()  # ddof=0, matching DoE
+                
+                n_days = post_days if post_len > 0 else 21
+                delta_log = (_z_alpha + _z_beta) * sigma / np.sqrt(n_days)
+                cluster_mde = np.exp(delta_log) - 1
+                mde_str = f"{cluster_mde*100:.2f}%"
+            except Exception:
+                mde_str = "N/A"
+            
+            lift_pct_str = f"{lift_pct*100:.2f}%"
             ci_str = f"[{ci_l_pct*100:.2f}%, {ci_u_pct*100:.2f}%]"
             ci_abs_str = f"[{ci_l_abs:.1f}, {ci_u_abs:.1f}]"
             
-            print(f"{i:<7} | {treatment_str:<10} | {post_real_sum:<10.2f} | {post_synth_sum:<10.2f} | {lift_pct*100:<7.2f}% | {lift_abs:<10.2f} | {ci_str:<18} | {ci_abs_str:<18} | {sig}")
+            row = (f"{i:<8}| {treatment_str:<11}| {post_real_sum:<11.2f}| {post_synth_sum:<11.2f}"
+                   f"| {lift_pct_str:<10}| {lift_abs:<11.2f}| {ci_str:<20}| {ci_abs_str:<20}"
+                   f"| {'[Yes]' if sig_flag else '[No]':<8}| {'[Yes]' if causal_flag else '[No]':<10}| {mde_str}")
+            print(row)
             
             tot_lifts_abs.append(lift_abs)
             tot_real_abs.append(post_real_sum)
@@ -362,7 +370,7 @@ def run_geo_experiment(
             ci_lowers_abs.append(ci_l_abs)
             ci_uppers_abs.append(ci_u_abs)
             
-        print("-" * 125)
+        print("-" * TABLE_W)
         
         sum_real = sum(tot_real_abs)
         sum_synth = sum(tot_synth_abs)
@@ -371,7 +379,6 @@ def run_geo_experiment(
         
         # Proper aggregated bootstrap for confidence intervals
         try:
-            import numpy as np
             from reallift.geo.bootstrap import bootstrap_significance
             
             # Extract time series arrays for the post period
@@ -397,18 +404,57 @@ def run_geo_experiment(
             agg_ci_l_pct = agg_ci_l_abs / sum_synth if sum_synth != 0 else 0.0
             agg_ci_u_pct = agg_ci_u_abs / sum_synth if sum_synth != 0 else 0.0
         
-        print("\n=== CONSOLIDATED IMPACT ===\n")
-        print(f"  Total Observed Output          : {sum_real:,.2f}")
-        expected_label = "Matched Baseline (Expected)" if is_did else "Synthetic (Expected)"
-        print(f"  Total {expected_label:<21}: {sum_synth:,.2f}")
-        print(f"  --------------------------------------------------")
-        print(f"  INCREMENTAL ABOLUTE LIFT       : {sum_lift:,.2f}")
-        print(f"  95% Confidence Interval (abs)  : [{agg_ci_l_abs:,.1f}, {agg_ci_u_abs:,.1f}]")
-        print(f"  --------------------------------------------------")
-        print(f"  INCREMENTAL PERCENTUAL LIFT    : {agg_lift_pct*100:.2f}%")
-        print(f"  95% Confidence Interval (%)    : [{agg_ci_l_pct*100:.2f}%, {agg_ci_u_pct*100:.2f}%]")
+        # Consolidated MDE — average of per-cluster residuals (matching DoE consolidated mode)
+        try:
+            all_cluster_residuals = []
+            for res in results:
+                syn = res["synthetic"]
+                t_idx = syn["plotting_data"]["treatment_idx"]
+                treat_geos = res["cluster"]["treatment"]
+                ctrl_geos = list(syn["weights"].keys())
+                df_syn = syn["df"]
+                pre_data = df_syn.iloc[:t_idx].copy()
+                
+                if len(treat_geos) > 1:
+                    treat_series = pre_data[treat_geos].mean(axis=1)
+                else:
+                    treat_series = pre_data[treat_geos[0]]
+                
+                cols_for_log = pd.DataFrame({"_treat": treat_series.values}, index=pre_data.index)
+                for g in ctrl_geos:
+                    cols_for_log[g] = pre_data[g].values
+                
+                log_diff = np.log(cols_for_log).diff().dropna()
+                y_ld = log_diff["_treat"].values
+                X_ld = log_diff[ctrl_geos].values
+                w_vals = np.array([syn["weights"][g] for g in ctrl_geos])
+                residuals = y_ld - X_ld @ w_vals
+                all_cluster_residuals.append(pd.Series(residuals))
+            
+            # Average per-cluster residuals → std of the mean (same as DoE consolidated)
+            residuals_df = pd.concat([r.reset_index(drop=True) for r in all_cluster_residuals], axis=1)
+            mean_residuals = residuals_df.mean(axis=1)
+            sigma_cons = mean_residuals.std()
+            
+            n_days_cons = post_days if post_len > 0 else 21
+            delta_cons = (_z_alpha + _z_beta) * sigma_cons / np.sqrt(n_days_cons)
+            consolidated_mde = np.exp(delta_cons) - 1
+            cons_mde_str = f"{consolidated_mde*100:.2f}%"
+        except Exception:
+            cons_mde_str = "N/A"
         
-        final_sig = "✔ Statistically Significant" if (agg_ci_l_abs > 0 or agg_ci_u_abs < 0) else "✘ Not Statistically Significant"
+        print(f"\n=== CONSOLIDATED IMPACT ({mde_col_label}: {cons_mde_str}) ===\n")
+        expected_label = "Total Matched Baseline (Expected)" if is_did else "Total Synthetic (Expected)"
+        print(f"  {'Total Observed Output':<33}: {sum_real:,.2f}")
+        print(f"  {expected_label:<33}: {sum_synth:,.2f}")
+        print(f"  --------------------------------------------------")
+        print(f"  {'INCREMENTAL ABSOLUTE LIFT':<33}: {sum_lift:,.2f}")
+        print(f"  {'95% Confidence Interval (abs)':<33}: [{agg_ci_l_abs:,.1f}, {agg_ci_u_abs:,.1f}]")
+        print(f"  --------------------------------------------------")
+        print(f"  {'INCREMENTAL PERCENTUAL LIFT':<33}: {agg_lift_pct*100:.2f}%")
+        print(f"  {'95% Confidence Interval (%)':<33}: [{agg_ci_l_pct*100:.2f}%, {agg_ci_u_pct*100:.2f}%]")
+        
+        final_sig = "[Yes] Statistically Significant" if (agg_ci_l_abs > 0 or agg_ci_u_abs < 0) else "[No] Not Statistically Significant"
         print(f"\n  Result: {final_sig}\n")
         print("=" * 70 + "\n")
 
@@ -622,7 +668,7 @@ def design_of_experiments(
                 )
         except Exception as e:
             if verbose:
-                print(f"  ⚠ Failed to find clusters: {e}\n")
+                print(f"  [Error] Failed to find clusters: {e}\n")
             scenarios.append({
                 "pct_treatment": pct,
                 "n_treatment": n_treat,
@@ -758,7 +804,7 @@ def design_of_experiments(
                         
                 if experiment_type == "synthetic_control" and used_fallback:
                     if verbose:
-                        print("\n  [AUTO SENSOR] ⚠ Strict rules failed for some Geos. Data may be too volatile for stable Synthetic Control.")
+                        print("\n  [AUTO SENSOR] [Warning] Strict rules failed for some Geos. Data may be too volatile for stable Synthetic Control.")
                         print("                  Consider re-evaluating the design with experiment_type='matched_did'.")
             
             clusters = [item["best"] for item in refined_clusters]
@@ -806,7 +852,7 @@ def design_of_experiments(
 
             if experiment_type == "synthetic_control" and not all_passed:
                 if verbose:
-                    print("\n  [AUTO SENSOR] ⚠ Some fixed clusters failed strict rules. Data may be too volatile for stable Synthetic Control.")
+                    print("\n  [AUTO SENSOR] [Warning] Some fixed clusters failed strict rules. Data may be too volatile for stable Synthetic Control.")
                     print("                  Consider re-evaluating the design with experiment_type='matched_did'.")
                     
             clusters = [item["best"] for item in raw_items]
@@ -1140,7 +1186,7 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
 
                 # Flag overfitting
                 gap = row['r2_train'] - row['r2_test']
-                flag = " ⚠" if gap > 0.2 else ""
+                flag = " [Warning]" if gap > 0.2 else ""
 
                 print(f"  {i:<7} | {treat:<10} | {r2_tr:<8} | {r2_te:<8} | {mape_tr:<8} | {mape_te:<8} | {wape_tr:<8} | {wape_te:<8}{flag}")
 

@@ -183,9 +183,9 @@ def run_synthetic_control(
         print(f"p-value (bootstrap): {boot_result['p_value_boot']:.4f}")
 
         if boot_result['ci_lower_total_abs'] > 0 or boot_result['ci_upper_total_abs'] < 0:
-            print("✔ Lift statistically significant (CI does not cross 0)")
+            print("[Yes] Lift statistically significant (CI does not cross 0)")
         else:
-            print("⚠️ Lift NOT significant (CI crosses 0)")
+            print("[No] Lift NOT significant (CI crosses 0)")
 
     if plot:
         plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result)

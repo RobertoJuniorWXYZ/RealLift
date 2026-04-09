@@ -359,11 +359,11 @@ def _compute_and_report(
         print(f"Effect percent real: {delta_pct*100:.2f}%")
         print("\n=== RESULT ===")
         if best_days:
-            print(f"✔ Min duration: {best_days} days")
-            print(f"✔ Power: {best_power:.2%}")
+            print(f"[Yes] Min duration: {best_days} days")
+            print(f"[Yes] Power: {best_power:.2%}")
         else:
-            print("⚠️ Did not reach target power in tested days")
-            print(f"👉 Estimated days needed: {estimated_days} days")
+            print("[Warning] Did not reach target power in tested days")
+            print(f"[Tip] Estimated days needed: {estimated_days} days")
 
     summary = _build_summary(
         start_date_str, end_date_str, mean_treat, sigma,

@@ -90,9 +90,9 @@ def run_placebo_tests(
         print(f"P-value (placebo): {p_value:.4f}")
         
         if p_value <= 0.10:
-            print(f"✔ High confidence: Observed deviation is significantly higher than random noise (MSPE Ratio).")
+            print(f"[Yes] High confidence: Observed deviation is significantly higher than random noise (MSPE Ratio).")
         else:
-            print("✖ Warning: Observed deviation is within the range of random noise (high p-value).")
+            print("[Warning] Observed deviation is within the range of random noise (high p-value).")
 
     if plot and len(placebo_ratios) > 0:
         plot_placebo_tests(placebo_ratios, observed_ratio)
