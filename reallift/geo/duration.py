@@ -167,6 +167,11 @@ def estimate_duration(
             sigma = mean_residuals.std()
             method = "residuals"
             n_series = len(cluster_residuals)
+            # Autocorrelation correction on pooled residuals
+            rho1_cons = mean_residuals.autocorr(lag=1)
+            if np.isnan(rho1_cons) or rho1_cons < 0:
+                rho1_cons = 0.0
+            ac_factor_cons = (1 - rho1_cons) / (1 + rho1_cons)
         else:
             # Fallback: variance of the aggregated treatment log-diffs
             if isinstance(treatment_geo, list) and len(treatment_geo) > 1:
@@ -179,6 +184,10 @@ def estimate_duration(
             sigma = treatment_mean_logdiff.std()
             method = "treatment_variance"
             n_series = len(treatment_geo) if isinstance(treatment_geo, list) else 1
+            rho1_cons = treatment_mean_logdiff.autocorr(lag=1)
+            if np.isnan(rho1_cons) or rho1_cons < 0:
+                rho1_cons = 0.0
+            ac_factor_cons = (1 - rho1_cons) / (1 + rho1_cons)
 
         return _compute_and_report(
             mde=mde,
@@ -199,6 +208,8 @@ def estimate_duration(
             extra_stats={
                 "method": method,
                 "n_series": n_series,
+                "rho1": rho1_cons,
+                "ac_factor": ac_factor_cons,
             }
         )
 
@@ -243,6 +254,13 @@ def estimate_duration(
 
     residual_reg = y - y_pred
 
+    # Autocorrelation correction: compute lag-1 autocorrelation of residuals
+    # to adjust effective sample size for serial dependence in daily data
+    rho1 = pd.Series(residual_reg).autocorr(lag=1)
+    if np.isnan(rho1) or rho1 < 0:
+        rho1 = 0.0  # Conservative: no correction if negative or undefined
+    ac_factor = (1 - rho1) / (1 + rho1)  # n_eff = n * ac_factor
+
     return _compute_and_report(
         mde=mde,
         alpha=alpha,
@@ -265,6 +283,8 @@ def estimate_duration(
             "std_residual_regression": std_residual_reg,
             "r_squared": r_squared,
             "correlation": corr,
+            "rho1": rho1,
+            "ac_factor": ac_factor,
         },
         residuals=pd.Series(residual_reg)
     )
@@ -282,12 +302,15 @@ def _compute_and_report(
     Internal: compute MDE curve or power curve and produce output.
     Shared between consolidated and per-cluster modes.
     """
+    # Autocorrelation correction factor: n_eff = n * ac_factor
+    ac_factor = extra_stats.get("ac_factor", 1.0)
 
     # ── AUTO-MDE MODE (mde=None) ─────────────────────────────────────────
     if mde is None:
         mde_curve = []
         for d in days_list:
-            delta = (z_alpha + z_beta) * sigma / np.sqrt(d)
+            n_eff = max(d * ac_factor, 1)  # effective sample size
+            delta = (z_alpha + z_beta) * sigma / np.sqrt(n_eff)
             mde_curve.append({
                 "days": d,
                 "mde": np.exp(delta) - 1,
@@ -321,8 +344,9 @@ def _compute_and_report(
     delta_pct = np.exp(delta) - 1
     delta_abs = mean_treat * delta_pct
 
-    def compute_power(effect, std, n, a):
-        se = std / np.sqrt(n)
+    def compute_power(effect, std, n, a, ac_f=1.0):
+        n_eff = max(n * ac_f, 1)  # effective sample size
+        se = std / np.sqrt(n_eff)
         z = effect / se
         z_a = norm.ppf(1 - a / 2)
         return norm.cdf(z - z_a)
@@ -331,7 +355,7 @@ def _compute_and_report(
     for d in days_list:
         results.append({
             "days": d,
-            "power": compute_power(delta, sigma, d, alpha),
+            "power": compute_power(delta, sigma, d, alpha, ac_factor),
         })
 
     results_df = pd.DataFrame(results)
@@ -346,7 +370,7 @@ def _compute_and_report(
         best_days = None
         best_power = None
         n_est = ((z_alpha + z_beta) * sigma / delta) ** 2
-        estimated_days = int(np.ceil(n_est))
+        estimated_days = int(np.ceil(n_est / ac_factor)) if ac_factor > 0 else int(np.ceil(n_est))
 
     if verbose:
         _print_header(consolidated, cluster_idx, auto_mde=False)

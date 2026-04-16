@@ -114,27 +114,25 @@ def validate_geo_clusters(
 
             if force_equal_weights:
                 weights = np.ones(X_train.shape[1]) / X_train.shape[1]
-                intercept_val = 0.0
             else:
                 w = cp.Variable(X_train.shape[1])
-                alpha_intercept = cp.Variable()
 
-                obj = cp.Minimize(cp.sum_squares(y_norm - (X_norm @ w + alpha_intercept)))
+                # NO INTERCEPT — consistent with discovery.py and synthetic.py
+                # Prevents intercept from absorbing level differences that inflate R²
+                obj = cp.Minimize(cp.sum_squares(y_norm - (X_norm @ w)))
                 cons = [w >= 0, cp.sum(w) == 1]
                 prob = cp.Problem(obj, cons)
                 try:
                     prob.solve(solver=cp.SCS, verbose=False)
                     weights = np.array(w.value).flatten()
-                    intercept_val = float(alpha_intercept.value)
                 except:
                     weights = np.ones(X_train.shape[1]) / X_train.shape[1]
-                    intercept_val = 0.0
 
             X_test_norm = X_test / X_mean
-            y_pred_norm_test = X_test_norm @ weights + intercept_val
+            y_pred_norm_test = X_test_norm @ weights
             y_pred_test = y_pred_norm_test * y_mean
             
-            y_pred_norm_train = X_norm @ weights + intercept_val
+            y_pred_norm_train = X_norm @ weights
             y_pred_train = y_pred_norm_train * y_mean
             
             return y_pred_train, y_pred_test

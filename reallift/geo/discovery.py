@@ -16,6 +16,7 @@ def discover_geo_clusters(
     end_date=None,
     use_elasticnet=True,
     search_mode="auto",
+    n_jobs=None,
     verbose=True,
     show_results=True
 ) -> list:
@@ -85,11 +86,11 @@ def discover_geo_clusters(
             all_treatment_geos=set(),
             use_elasticnet=use_elasticnet,
             alpha_grid=alpha_grid, l1_grid=l1_grid,
-            verbose=verbose, desc="Screening geos"
+            verbose=verbose, desc="Screening geos", n_jobs=n_jobs
         )
 
         # Sort and pick top-k
-        phase1_results.sort(key=lambda x: x["synthetic_error_ratio"])
+        phase1_results.sort(key=lambda x: x["ser"])
         top_k = [r["treatment"][0] for r in phase1_results[:n_treatment]]
 
         if verbose:
@@ -103,7 +104,7 @@ def discover_geo_clusters(
             all_treatment_geos=set(top_k),
             use_elasticnet=use_elasticnet,
             alpha_grid=alpha_grid, l1_grid=l1_grid,
-            verbose=False, desc=None
+            verbose=False, desc=None, n_jobs=n_jobs
         )
 
         clusters = _build_clusters(results, use_elasticnet)
@@ -125,11 +126,12 @@ def discover_geo_clusters(
         use_elasticnet=use_elasticnet,
         alpha_grid=alpha_grid, l1_grid=l1_grid,
         verbose=verbose,
-        desc="Evaluating Combinations" if fixed_treatment is None else "Evaluating Fixed"
+        desc="Evaluating Combinations" if fixed_treatment is None else "Evaluating Fixed",
+        n_jobs=n_jobs
     )
 
     if use_elasticnet:
-        results = sorted(results, key=lambda x: x["synthetic_error_ratio"])
+        results = sorted(results, key=lambda x: x["ser"])
     else:
         results = sorted(results, key=lambda x: x["rmspe"])
 
@@ -138,26 +140,138 @@ def discover_geo_clusters(
     if verbose and show_results:
         _print_results(clusters, is_fixed=(fixed_treatment is not None))
 
-    return clusters if fixed_treatment else clusters[:5]
+    return clusters if fixed_treatment else clusters[:10]
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
 
+def _eval_single_combination(args):
+    """Evaluate a single treatment combination. Top-level for pickling."""
+    treatment_comb, df_dict, geos, clean_all_treatments, use_elasticnet, alpha_grid, l1_grid = args
+    
+    # Reconstruct DataFrame from dict (for multiprocessing serialization)
+    df = pd.DataFrame(df_dict)
+    
+    treatment_comb = [str(x).strip() for x in list(treatment_comb)]
+    
+    # Isolation Core: Absolute ban on any treatment unit in the donor pool
+    forbidden_geos = set(treatment_comb).union(clean_all_treatments)
+    control_pool = [str(g).strip() for g in geos if str(g).strip() not in forbidden_geos]
+
+    try:
+        df_transformed = log_diff_transform(df, treatment_comb + control_pool)
+
+        y = df_transformed[treatment_comb].mean(axis=1).values
+        X = df_transformed[control_pool].values
+
+        X_scaled, _ = scale_data(X)
+
+        best_local = None
+
+        for a in alpha_grid:
+            for l1 in l1_grid:
+                if use_elasticnet:
+                    model = ElasticNet(alpha=a, l1_ratio=l1, max_iter=10000)
+                    model.fit(X_scaled, y)
+
+                    coefs = model.coef_
+                    selected_controls = [
+                        control_pool[i]
+                        for i in range(len(control_pool))
+                        if coefs[i] > 0
+                    ]
+
+                    if len(selected_controls) == 0:
+                        idx_max = np.argmax(np.abs(coefs))
+                        selected_controls = [control_pool[idx_max]]
+                else:
+                    selected_controls = control_pool
+
+                # Synthetic Control optimization
+                final_weights = []
+                try:
+                    X_syn = df[selected_controls].values.astype(float)
+                    y_syn = df[list(treatment_comb)].mean(axis=1).values.astype(float)
+                    
+                    y_mean_syn = y_syn.mean()
+                    if y_mean_syn == 0: y_mean_syn = 1e-10
+                    X_mean_syn = X_syn.mean(axis=0)
+                    X_mean_syn[X_mean_syn == 0] = 1e-10
+
+                    y_norm_syn = y_syn / y_mean_syn
+                    X_norm_syn = X_syn / X_mean_syn
+
+                    w_syn = cp.Variable(len(selected_controls))
+                    
+                    # NO INTERCEPT in discovery for consistency with synthetic.py
+                    obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn)))
+                    cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
+                    prob_syn = cp.Problem(obj_syn, cons_syn)
+                    prob_syn.solve(solver=cp.SCS, verbose=False)
+
+                    w_vals = np.array(w_syn.value).flatten()
+                    final_controls_with_w = [(c, w_val) for c, w_val in zip(selected_controls, w_vals) if w_val > 0.001]
+                    
+                    if len(final_controls_with_w) == 0:
+                        final_controls = selected_controls
+                        final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
+                    else:
+                        final_controls = [x[0] for x in final_controls_with_w]
+                        final_weights = [x[1] for x in final_controls_with_w]
+                        
+                        sum_w = sum(final_weights)
+                        if sum_w > 0:
+                            final_weights = [w / sum_w for w in final_weights]
+                except Exception:
+                    final_controls = selected_controls
+                    final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
+
+                X_selected = df_transformed[final_controls].values
+
+                if use_elasticnet:
+                    X_selected_scaled, _ = scale_data(X_selected)
+                    model.fit(X_selected_scaled, y)
+                    y_pred = model.predict(X_selected_scaled)
+                else:
+                    weight_array = np.array(final_weights)
+                    y_pred = X_selected @ weight_array
+                    
+                residual = y - y_pred
+
+                std_residual = float(np.std(residual))
+                rmspe = float(np.sqrt(np.mean(residual**2)))
+                
+                if np.std(y) > 0 and np.std(y_pred) > 0:
+                    corr = float(np.corrcoef(y, y_pred)[0, 1])
+                else:
+                    corr = 0.0
+
+                candidate = {
+                    "treatment": list(treatment_comb),
+                    "control": final_controls,
+                    "control_weights": final_weights,
+                    "std_residual": std_residual,
+                    "rmspe": rmspe,
+                    "correlation": corr,
+                    "ser": std_residual / (corr + 1e-6),
+                    "n_controls": len(selected_controls),
+                    "alpha": a,
+                    "l1_ratio": l1
+                }
+
+                if best_local is None or candidate["ser"] < best_local["ser"]:
+                    best_local = candidate
+
+        return best_local
+
+    except Exception:
+        return None
+
+
 def _evaluate_combinations(df, geos, treatment_combinations, all_treatment_geos,
-                           use_elasticnet, alpha_grid, l1_grid, verbose, desc):
-    """Run the evaluation loop over treatment combinations."""
-    if verbose and desc:
-        try:
-            from tqdm import tqdm
-            iterator = tqdm(treatment_combinations, desc=desc, leave=True)
-        except ImportError:
-            iterator = treatment_combinations
-            print(f"{desc}: {len(treatment_combinations)} combinations...")
-    else:
-        iterator = treatment_combinations
-
-    results = []
-
+                           use_elasticnet, alpha_grid, l1_grid, verbose, desc, n_jobs=1):
+    """Run the evaluation loop over treatment combinations (sequential or parallel)."""
+    
     # Ensure all_treatment_geos is a flat set of strings
     clean_all_treatments = set()
     if all_treatment_geos:
@@ -165,124 +279,73 @@ def _evaluate_combinations(df, geos, treatment_combinations, all_treatment_geos,
             if isinstance(t, list): clean_all_treatments.update([str(x).strip() for x in t])
             else: clean_all_treatments.add(str(t).strip())
 
-    for treatment_comb in iterator:
-        treatment_comb = [str(x).strip() for x in list(treatment_comb)]
+    # Serialize DataFrame to dict for multiprocessing
+    df_dict = df.to_dict(orient='list')
+    
+    # Build args for each combination
+    args_list = [
+        (tc, df_dict, geos, clean_all_treatments, use_elasticnet, alpha_grid, l1_grid)
+        for tc in treatment_combinations
+    ]
+
+    n_total = len(treatment_combinations)
+
+    # Resolve n_jobs: auto-detect optimal workers based on workload
+    import os
+    cpu_count = os.cpu_count() or 1
+    max_safe_jobs = max(cpu_count // 2, 1)
+    if n_jobs is None:
+        # Auto: parallelize only if workload justifies the overhead
+        n_jobs = max_safe_jobs if n_total > 50 else 1
+    elif n_jobs == -1:
+        n_jobs = max_safe_jobs
+    elif n_jobs == 0:
+        n_jobs = 1
+    elif n_jobs > max_safe_jobs:
+        n_jobs = max_safe_jobs
+    
+    if n_jobs == 1:
+        # Sequential mode (original behavior)
+        if verbose and desc:
+            try:
+                from tqdm import tqdm
+                iterator = tqdm(args_list, desc=desc, leave=True)
+            except ImportError:
+                iterator = args_list
+                print(f"{desc}: {n_total} combinations...")
+        else:
+            iterator = args_list
+
+        results = []
+        for args in iterator:
+            result = _eval_single_combination(args)
+            if result is not None:
+                results.append(result)
+    else:
+        # Parallel mode
+        from concurrent.futures import ProcessPoolExecutor
         
-        # Isolation Core: Absolute ban on any treatment unit in the donor pool
-        forbidden_geos = set(treatment_comb).union(clean_all_treatments)
-        control_pool = [str(g).strip() for g in geos if str(g).strip() not in forbidden_geos]
-
+        effective_jobs = min(n_jobs, n_total)
+        if verbose and desc:
+            print(f"{desc}: {n_total:,} combinations | {effective_jobs} workers")
+        
+        results = []
         try:
-            df_transformed = log_diff_transform(df, treatment_comb + control_pool)
-
-            y = df_transformed[treatment_comb].mean(axis=1).values
-            X = df_transformed[control_pool].values
-
-            X_scaled, _ = scale_data(X)
-
-            best_local = None
-
-            for a in alpha_grid:
-                for l1 in l1_grid:
-                    if use_elasticnet:
-                        model = ElasticNet(alpha=a, l1_ratio=l1, max_iter=10000)
-                        model.fit(X_scaled, y)
-
-                        coefs = model.coef_
-                        selected_controls = [
-                            control_pool[i]
-                            for i in range(len(control_pool))
-                            if coefs[i] > 0
-                        ]
-
-                        if len(selected_controls) == 0:
-                            idx_max = np.argmax(np.abs(coefs))
-                            selected_controls = [control_pool[idx_max]]
-                    else:
-                        selected_controls = control_pool
-
-                    # Synthetic Control optimization
-                    final_weights = []
-                    try:
-                        X_syn = df[selected_controls].values.astype(float)
-                        y_syn = df[list(treatment_comb)].mean(axis=1).values.astype(float)
-                        
-                        y_mean_syn = y_syn.mean()
-                        if y_mean_syn == 0: y_mean_syn = 1e-10
-                        X_mean_syn = X_syn.mean(axis=0)
-                        X_mean_syn[X_mean_syn == 0] = 1e-10
-
-                        y_norm_syn = y_syn / y_mean_syn
-                        X_norm_syn = X_syn / X_mean_syn
-
-                        w_syn = cp.Variable(len(selected_controls))
-                        
-                        # NO INTERCEPT in discovery for consistency with synthetic.py
-                        obj_syn = cp.Minimize(cp.sum_squares(y_norm_syn - (X_norm_syn @ w_syn)))
-                        cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
-                        prob_syn = cp.Problem(obj_syn, cons_syn)
-                        prob_syn.solve(solver=cp.SCS, verbose=False)
-
-                        w_vals = np.array(w_syn.value).flatten()
-                        final_controls_with_w = [(c, w_val) for c, w_val in zip(selected_controls, w_vals) if w_val > 0.001]
-                        
-                        if len(final_controls_with_w) == 0:
-                            final_controls = selected_controls
-                            final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
-                        else:
-                            final_controls = [x[0] for x in final_controls_with_w]
-                            final_weights = [x[1] for x in final_controls_with_w]
-                            
-                            sum_w = sum(final_weights)
-                            if sum_w > 0:
-                                final_weights = [w / sum_w for w in final_weights]
-                    except Exception:
-                        final_controls = selected_controls
-                        final_weights = [1.0 / len(selected_controls)] * len(selected_controls)
-
-                    X_selected = df_transformed[final_controls].values
-
-                    if use_elasticnet:
-                        X_selected_scaled, _ = scale_data(X_selected)
-                        model.fit(X_selected_scaled, y)
-                        y_pred = model.predict(X_selected_scaled)
-                    else:
-                        weight_array = np.array(final_weights)
-                        y_pred = X_selected @ weight_array
-                        
-                    residual = y - y_pred
-
-                    std_residual = float(np.std(residual))
-                    rmspe = float(np.sqrt(np.mean(residual**2)))
-                    
-                    if np.std(y) > 0 and np.std(y_pred) > 0:
-                        corr = float(np.corrcoef(y, y_pred)[0, 1])
-                    else:
-                        corr = 0.0
-
-                    candidate = {
-                        "treatment": list(treatment_comb),
-                        "control": final_controls,
-                        "control_weights": final_weights,
-                        "std_residual": std_residual,
-                        "rmspe": rmspe,
-                        "correlation": corr,
-                        "synthetic_error_ratio": std_residual / (corr + 1e-6),
-                        "n_controls": len(selected_controls),
-                        "alpha": a,
-                        "l1_ratio": l1
-                    }
-
-                    if best_local is None or std_residual < best_local["std_residual"]:
-                        best_local = candidate
-
-            if best_local:
-                results.append(best_local)
-
-        except Exception as e:
-            if verbose:
-                print(f"Error with combination {treatment_comb}: {e}")
-            continue
+            from tqdm import tqdm
+            with ProcessPoolExecutor(max_workers=effective_jobs) as executor:
+                for result in tqdm(
+                    executor.map(_eval_single_combination, args_list, chunksize=max(1, n_total // (effective_jobs * 4))),
+                    total=n_total,
+                    desc=desc,
+                    leave=True
+                ):
+                    if result is not None:
+                        results.append(result)
+        except ImportError:
+            with ProcessPoolExecutor(max_workers=effective_jobs) as executor:
+                for result in executor.map(_eval_single_combination, args_list, chunksize=max(1, n_total // (effective_jobs * 4))):
+                    if result is not None:
+                        results.append(result)
 
     if len(results) == 0:
         raise ValueError("No valid combinations found.")
@@ -293,7 +356,7 @@ def _evaluate_combinations(df, geos, treatment_combinations, all_treatment_geos,
 def _build_clusters(results, use_elasticnet):
     """Sort results and build cluster list."""
     if use_elasticnet:
-        results = sorted(results, key=lambda x: x["synthetic_error_ratio"])
+        results = sorted(results, key=lambda x: x["ser"])
     else:
         results = sorted(results, key=lambda x: x["rmspe"])
 
@@ -306,7 +369,7 @@ def _build_clusters(results, use_elasticnet):
             "correlation": res["correlation"],
             "std_residual": res["std_residual"],
             "rmspe": res["rmspe"],
-            "synthetic_error_ratio": res["synthetic_error_ratio"],
+            "ser": res["ser"],
             "n_controls": res["n_controls"],
             "alpha": res["alpha"],
             "l1_ratio": res["l1_ratio"]
@@ -323,7 +386,7 @@ def _print_results(clusters, is_fixed):
         print("SEARCH ENGINE COMPLETED")
         print(f"Top {min(len(clusters), 5)} experiment design recommendations (ranked by lowest numerical risk):")
         print("Tip: Recommendation 0 is statistically your most precise choice for simulation.")
-        print("     It minimizes the 'Synthetic Error Ratio' (Std Residual / Correlation), balancing low error with high synchronization.")
+        print("     It minimizes the 'Synthetic Error Ratio (SER)' (Std Residual / Correlation), balancing low error with high synchronization.")
         print("-"*60)
         label_prefix = "RECOMMENDATION"
     else:
@@ -341,7 +404,7 @@ def _print_results(clusters, is_fixed):
     
     for i, c in enumerate(display_clusters):
         treatment_str = ", ".join(c['treatment'])
-        print(f"\n{label_prefix} {i} | Treatment: [{treatment_str}] | Correlation: {c['correlation']:.4f} | RMSPE: {c['rmspe']:.4f} | Std Residual: {c['std_residual']:.4f} | Synthetic Error Ratio: {c['synthetic_error_ratio']:.4f}")
+        print(f"\n{label_prefix} {i} | Treatment: [{treatment_str}] | Correlation: {c['correlation']:.4f} | RMSPE: {c['rmspe']:.4f} | Std Residual: {c['std_residual']:.4f} | SER: {c['ser']:.4f}")
         print("-" * 60)
         
         controls_with_weights = list(zip(c['control'], c.get('control_weights', [])))
