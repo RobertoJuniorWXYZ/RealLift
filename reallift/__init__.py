@@ -10,5 +10,6 @@ from .geo import (
 )
 from .pipelines.geo_pipeline import run_geo_experiment, design_of_experiments
 from .simulation import generate_geo_data, generate_simulated_intervention
+from .utils import clean_geo_data
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"

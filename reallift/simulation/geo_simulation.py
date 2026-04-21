@@ -22,7 +22,8 @@ def generate_geo_data(
     pre_file_name="synthetic_geolift_pre.csv",
     base_value=50.0,
     as_integer=False,
-    pre_only=False
+    pre_only=False,
+    n_zeros=0
 ) -> tuple:
     """
     Generate synthetic GeoLift data.
@@ -48,6 +49,7 @@ def generate_geo_data(
         base_value (float or list or tuple): Base generation metric (e.g. baseline sales volume). If list [min, max], randomize between range.
         as_integer (bool): If True, casts the simulated output dataframe strictly into integers.
         pre_only (bool): If True, returns and plots only the pre-treatment period data.
+        n_zeros (int): Number of zero-value holes to randomly inject across the dataset.
 
     Returns:
         tuple: (df, df_pre, treatment_geos)
@@ -114,6 +116,18 @@ def generate_geo_data(
             series = np.round(series).astype(int)
 
         df[geo_name] = series
+
+    if n_zeros > 0:
+        geo_cols = [c for c in df.columns if c != "date"]
+        total_cells = len(df) * len(geo_cols)
+        actual_zeros = min(n_zeros, total_cells)
+        
+        flat_indices = np.random.choice(total_cells, size=actual_zeros, replace=False)
+        for idx in flat_indices:
+            r = idx // len(geo_cols)
+            c = geo_cols[idx % len(geo_cols)]
+            # We assign np.nan instead of 0 so matplotlib breaks the line cleanly
+            df.loc[df.index[r], c] = np.nan
 
     pre_mask = df["date"] < t_start
     df_pre = df.loc[pre_mask].copy()

@@ -97,3 +97,6 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# RealLift Secure Data (Confidential PoCs)
+examples/geotests/PoCs/
