@@ -38,10 +38,16 @@ $$ SER = \frac{\text{Std. Residual}}{\rho(Y_\text{Trat}, Y_\text{Sint}) + \epsil
 
 O SER atua como uma barreira pragmática e barata ao ruído. Ele penaliza agressivamente combinações que tentam ser "clones estáticos".
 
-1.  **Penalização de Zumbis**: Se a correlação tende a zero, o coeficiente $SER$ explode, enviando aquele cenário para o fundo do ranking de recomendações.
-2.  **Recompensa ao Co-movimento**: O SER aceita um erro absoluto ligeiramente maior (Numerador) se, em troca, ganhar uma sincronia maior nos picos e vales (Denominador). 
-3.  **Filtragem Proativa**: No DoE, rodamos milhares de combinações geográficas. O SER permite que o modelo escolha, de forma autônoma, os cenários que têm maior probabilidade de permanecer estáveis durante a campanha real.
+## 4. Ciclo de Vida e Atuação Técnica
+
+No framework RealLift, o SER não é apenas um indicador de qualidade passivo; ele atua como o motor de decisão do algoritmo em três momentos críticos:
+
+1.  **Autotuning (O Torneio de Modelos):** Para cada cidade, o algoritmo testa um grid de hiperparâmetros do ElasticNet (Alpha e L1 Ratio). O SER é a *Loss Function* que seleciona a configuração vencedora, garantindo que os pesos do controle sintético priorizem a sincronia comportamental.
+2.  **Screening (Ranking Global):** O SER define a fila de prioridades do Design de Experimentos. Unidades que apresentam um baixo SER individual são priorizadas, pois possuem maior viabilidade estatística de gerar resultados confiáveis e livre de ruídos.
+3.  **Purificação (Recálculo Dinâmico):** No modo de busca (`ranking`), o SER é recalculado sempre que um doador é "travado" como tratamento de outro cluster. Isso garante que a exclusão mútua de cidades (no-overlap) não degrade a qualidade do contrafactual final.
+
+---
 
 ## Conclusão
 
-O **Synthetic Error Ratio** é o coração da inteligência de seleção do RealLift. Ao equilibrar a precisão numérica (Resíduo) com a sincronia comportamental (Correlação), ele garante que seus experimentos geográficos sejam ancorados em contrafactuais vivos e reagentes à realidade do mercado.
+O **Synthetic Error Ratio** é o coração da inteligência de seleção do RealLift. Ao equilibrar a precisão numérica (Resíduo) com a sincronia comportamental (Correlação), ele transforma o Design de Experimentos de uma busca às cegas em um processo de engenharia de precisão, garantindo que seus experimentos geográficos sejam ancorados em contrafactuais vivos, robustos e reagentes à realidade do mercado.

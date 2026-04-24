@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import warnings
 import matplotlib.pyplot as plt
+from reallift.utils.reporting import generate_cleaning_report
 
 def clean_geo_data(
     data, 
@@ -11,12 +12,17 @@ def clean_geo_data(
     verbose: bool = True,
     plot: bool = False,
     save_csv: bool = True,
+    save_pdf: bool = False,
     file_name: str = 'cleaned_geo_data.csv',
+    pdf_name: str = 'cleaning_report.pdf',
     max_zero_rate: float = None,
     top_n_geos: int = None,
     keep_top_quantiles: int = None,
     exclude_geos: list = None,
-    quantile_bins: int = None
+    quantile_bins: int = None,
+    start_date: str = None,
+    end_date: str = None,
+    logo: str = None
 ) -> pd.DataFrame:
     """
     Cleans, standardizes, and validates raw geospatial time-series data for RealLift experimentation.
@@ -60,6 +66,10 @@ def clean_geo_data(
             to permanently remove (e.g., test regions or outliers).
         quantile_bins (int, optional): Number of segments for the volume distribution 
             analysis (e.g., 4 for Quartiles).
+        start_date (str, optional): Filter the dataset to start from this date (inclusive).
+            Format: 'YYYY-MM-DD'. Useful to restrict analysis to a specific sub-period.
+        end_date (str, optional): Filter the dataset to end at this date (inclusive).
+            Format: 'YYYY-MM-DD'.
         
     Returns:
         pd.DataFrame: A refined DataFrame indexed by date, with all selected 
@@ -89,21 +99,37 @@ def clean_geo_data(
         df[date_col] = pd.to_datetime(df[date_col].astype(str))
         
     df = df.sort_values(by=date_col).reset_index(drop=True)
+
+    # ── 1.5 Period Filter ──
+    if start_date is not None:
+        sd = pd.to_datetime(start_date)
+        df = df[df[date_col] >= sd]
+    if end_date is not None:
+        ed = pd.to_datetime(end_date)
+        df = df[df[date_col] <= ed]
+    if start_date is not None or end_date is not None:
+        df = df.reset_index(drop=True)
+        if verbose:
+            _sd = df[date_col].min().strftime('%Y-%m-%d')
+            _ed = df[date_col].max().strftime('%Y-%m-%d')
+            print(f"  [FILTER] Period restricted to: {_sd} → {_ed} ({len(df)} rows)")
+
     df_raw = df.copy()  # Snapshot of raw series for plotting
-    
-    start_date = df[date_col].min().strftime('%Y-%m-%d')
-    end_date = df[date_col].max().strftime('%Y-%m-%d')
+
+    period_start = df[date_col].min().strftime('%Y-%m-%d')
+    period_end   = df[date_col].max().strftime('%Y-%m-%d')
     total_days = (df[date_col].max() - df[date_col].min()).days + 1
     actual_rows = len(df)
-    
+
     if verbose:
-        print(f"\n  [TIME RANGE] {start_date} → {end_date}")
+        print(f"\n  [TIME RANGE] {period_start} → {period_end}")
         print(f"  [EXPECTED DAYS] {total_days} | [ACTUAL ROWS] {actual_rows}")
         if actual_rows < total_days:
             print("  [Warning] There are missing intermediate dates in the Series.")
             
     # ── 2. Geospatial Dimension Segregation ──
     geo_cols = [c for c in df.columns if c != date_col]
+    initial_geo_count = len(geo_cols)  # Capture BEFORE any filtering
     
     # ── 2.5 Hard Exception Filter ──
     if exclude_geos:
@@ -211,20 +237,12 @@ def clean_geo_data(
                 
                 print(f"  {q:<10} | {n_geos_q:<8} | {avg_zeros:<12} | {sum_vol_str:<18} | {pct_total:<12} | {cum_pct_str:<14} | {avg_vol_geo:<15}")
         
-        # Global summary
-        total_cells = total_len * len(geo_cols)
-        total_imputed = int(imputation_mask.sum().sum())
-        global_pct = total_imputed / total_cells * 100 if total_cells > 0 else 0
-        print(f"\n  [SUMMARY] {total_imputed:,} of {total_cells:,} cells imputed ({global_pct:.2f}% of matrix)")
-        print()
-        
     # ── 5.5 Optional Sparsity Filter ──
     if max_zero_rate is not None:
         rates = imputation_mask.sum() / len(imputation_mask)
         sparse_cols = rates[rates > max_zero_rate].index.tolist()
         if sparse_cols:
             df = df.drop(columns=sparse_cols)
-            # Update geo_cols to reflect reality for plotting below
             geo_cols = [c for c in geo_cols if c not in sparse_cols]
             if verbose:
                 print(f"  [FILTER] 'max_zero_rate={max_zero_rate}': Dropped {len(sparse_cols)} geos exceeding threshold.")
@@ -233,7 +251,6 @@ def clean_geo_data(
                 
     # ── 5.6 Optional Top N Geos Selector ──
     if top_n_geos is not None and top_n_geos < len(geo_cols):
-        # Using our score_df (sorted by Quality -> Volume)
         ordered_valid_geos = [c for c in score_df['Geo'].tolist() if c in geo_cols]
         kept_geos = ordered_valid_geos[:top_n_geos]
         dropped_topn = [c for c in geo_cols if c not in kept_geos]
@@ -251,7 +268,6 @@ def clean_geo_data(
         valid_qs = [f"Q{i}" for i in range(1, keep_top_quantiles + 1)]
         kept_geos_q = vol_df[vol_df['Quantile'].isin(valid_qs)]['Geo'].tolist()
         
-        # Keep only the intersection if prior filters dropped them
         kept_geos_q = [c for c in kept_geos_q if c in geo_cols]
         dropped_topq = [c for c in geo_cols if c not in kept_geos_q]
         
@@ -262,20 +278,35 @@ def clean_geo_data(
             print(f"  [FILTER] 'keep_top_quantiles={keep_top_quantiles}': Kept {len(geo_cols)} geos belonging to top {keep_top_quantiles} volume quantiles.")
             print(f"  [FILTER] Dropped {len(dropped_topq)} geos mapped to lower quantiles.")
             print()
-            
-    # ── 5.7 Final Geos Summary (GEOS SELECTED) ──
+
+    # ── 5.7 Compute Final Summary (always, for PDF and verbose) ──
+    # Stats for the FULL original matrix (before geo filtering)
+    all_geo_cols_in_mask = list(imputation_mask.columns)
+    total_cells_original = total_len * len(all_geo_cols_in_mask)
+    total_imputed_original = int(imputation_mask.sum().sum())
+    global_pct_original = total_imputed_original / total_cells_original * 100 if total_cells_original > 0 else 0
+    
+    # Stats for the SURVIVING geos only
+    surviving_mask = imputation_mask[[c for c in geo_cols if c in imputation_mask.columns]]
+    total_cells = total_len * len(geo_cols)
+    total_imputed = int(surviving_mask.sum().sum())
+    global_pct = total_imputed / total_cells * 100 if total_cells > 0 else 0
+    global_vol = score_df["Sum_Original"].sum()
+    
+    final_score_df = score_df[score_df['Geo'].isin(geo_cols)]
+    n_sel = len(final_score_df)
+    sum_vol = final_score_df["Sum_Original"].sum() if not final_score_df.empty else 0
+    avg_zeros_sel = f"{final_score_df['Zero_Rate'].mean():.2f}%" if not final_score_df.empty else "0.00%"
+    sum_vol_str = f"{sum_vol:,.2f}"
+    pct_total_sel = f"{(sum_vol / global_vol * 100):.2f}%" if global_vol > 0 else "0.00%"
+    avg_vol_sel = f"{(sum_vol / n_sel):,.2f}" if n_sel > 0 else "0.00"
+
     if verbose:
-        final_score_df = score_df[score_df['Geo'].isin(geo_cols)]
+        print(f"\n  [SUMMARY] Full Matrix: {total_imputed_original:,} of {total_cells_original:,} cells imputed ({global_pct_original:.2f}%)")
+        print(f"  [SUMMARY] Selected Geos: {total_imputed:,} of {total_cells:,} cells imputed ({global_pct:.2f}%)")
+        print()
+        
         if not final_score_df.empty:
-            global_vol = score_df["Sum_Original"].sum()
-            sum_vol = final_score_df["Sum_Original"].sum()
-            
-            n_sel = len(final_score_df)
-            avg_zeros_sel = f"{final_score_df['Zero_Rate'].mean():.2f}%"
-            sum_vol_str = f"{sum_vol:,.2f}"
-            pct_total_sel = f"{(sum_vol / global_vol * 100):.2f}%" if global_vol > 0 else "0.00%"
-            avg_vol_sel = f"{(sum_vol / n_sel):,.2f}"
-            
             print(f"  [GEOS SELECTED] Final Dataset Composition")
             sel_hdr = f"  {'Geos #':<8} | {'Avg % Zeros':<12} | {'Σ Volume':<18} | {'% of Total':<12} | {'Avg Vol/Geo':<15}"
             print(sel_hdr)
@@ -345,6 +376,38 @@ def clean_geo_data(
         plt.tight_layout()
         plt.show()
         
+    if save_pdf:
+        if verbose:
+            print(f"  [REPORT] Generating PDF report: '{pdf_name}'...")
+        
+        meta_info = {
+            'start': period_start, 'end': period_end, 'days': total_days,
+            'method': imputation_method, 'constant': constant_value,
+            'initial_geos': initial_geo_count,
+            'final_geos': len(geo_cols),
+            'total_cells_original': total_cells_original,
+            'imputed_cells_original': total_imputed_original,
+            'imputed_pct_original': global_pct_original,
+            'total_cells': total_cells,
+            'imputed_cells': total_imputed,
+            'imputed_pct': global_pct,
+            'n_sel': n_sel, 'avg_zeros_sel': avg_zeros_sel, 
+            'sum_vol_sel': sum_vol_str, 'pct_total_sel': pct_total_sel, 
+            'avg_vol_sel': avg_vol_sel
+        }
+        
+        generate_cleaning_report(
+            pdf_name=pdf_name,
+            meta_info=meta_info,
+            vol_df=vol_df,
+            final_score_df=final_score_df,
+            df_raw=df_raw,
+            df_cleaned=df,
+            date_col=date_col,
+            imputation_method=imputation_method,
+            logo=logo
+        )
+
     if save_csv:
         df.to_csv(file_name, index=False)
         if verbose:

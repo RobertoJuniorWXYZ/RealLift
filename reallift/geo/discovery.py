@@ -16,6 +16,8 @@ def discover_geo_clusters(
     end_date=None,
     use_elasticnet=True,
     search_mode="auto",
+    alpha=0.01,
+    l1_ratio=0.5,
     n_jobs=None,
     verbose=True,
     show_results=True
@@ -36,6 +38,10 @@ def discover_geo_clusters(
             - "exhaustive": test all C(n,k) combinations (default for small problems).
             - "ranking": screen geos individually, pick top-k, re-evaluate.
             - "auto": use ranking if C(n,k) > 1000, exhaustive otherwise.
+        alpha (float or list): ElasticNet regularization strength. 
+            Single value (default: 0.01) or list for grid search (e.g. [0.001, 0.01, 0.1]).
+        l1_ratio (float or list): ElasticNet L1/L2 mixing ratio.
+            Single value (default: 0.5) or list for grid search (e.g. [0.2, 0.5, 0.8]).
         verbose (bool): Whether to print running logs.
 
     Returns:
@@ -56,8 +62,12 @@ def discover_geo_clusters(
     if geos is None:
         geos = [col for col in df.columns if col != date_col]
 
-    alpha_grid = [0.001, 0.01, 0.1] if use_elasticnet else [0.0]
-    l1_grid = [0.2, 0.5, 0.8] if use_elasticnet else [0.0]
+    # Build grids from parameters (accept single value or list)
+    alpha_grid = alpha if isinstance(alpha, list) else [alpha]
+    l1_grid = l1_ratio if isinstance(l1_ratio, list) else [l1_ratio]
+    if not use_elasticnet:
+        alpha_grid = [0.0]
+        l1_grid = [0.0]
 
     # ── Determine effective search mode ───────────────────────────────────
     if fixed_treatment is not None:

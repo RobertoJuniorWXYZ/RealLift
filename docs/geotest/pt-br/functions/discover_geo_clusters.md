@@ -15,6 +15,9 @@ def discover_geo_clusters(
     end_date: str = None,
     use_elasticnet: bool = True,
     search_mode: str = "auto",
+    alpha: float | list = 0.01,
+    l1_ratio: float | list = 0.5,
+    n_jobs: int = None,
     verbose: bool = True,
     show_results: bool = True
 ) -> list
@@ -82,26 +85,24 @@ A função recebe dados tabulares em formato CSV com a seguinte estrutura espera
 
 | Parâmetro | Tipo | Default | Descrição |
 |:---|:---|:---|:---|
-| `use_elasticnet` | `bool` | `True` | Ativa a pré-filtragem de controles via ElasticNet. Quando `False`, todos os controles entram diretamente na otimização CVXPY com pesos uniformes como base inicial. |
+| `use_elasticnet` | `bool` | `True` | Ativa a pré-filtragem de controles via ElasticNet. Quando `False`, todos os controles entram diretamente na otimização CVXPY. |
 | `search_mode` | `str` | `"auto"` | Estratégia de busca: `"exhaustive"`, `"ranking"` ou `"auto"`. Ver seção 5.1 para detalhamento completo. |
-
-### 3.4 Parâmetros de interface
-
-| Parâmetro | Tipo | Default | Descrição |
-|:---|:---|:---|:---|
+| `alpha` | `float` \| `list` | `0.01` | Intensidade da regularização ElasticNet. Aceita valor único ou lista (ex: `[0.001, 0.01, 0.1]`) para realizar grid search automático. |
+| `l1_ratio` | `float` \| `list` | `0.5` | Balanço entre L1 (Lasso) e L2 (Ridge). Aceita valor único ou lista (ex: `[0.2, 0.5, 0.8]`) para grid search. |
+| `n_jobs` | `int` | `None` | Número de workers para processamento paralelo. Se `None`, autodetecta o melhor valor para o sistema. |
 | `verbose` | `bool` | `True` | Exibe logs progressivos e barra de progresso (via `tqdm`). |
 | `show_results` | `bool` | `True` | Imprime a tabela formatada de resultados ao final da execução. |
 
-### 3.5 Hiperparâmetros internos (não expostos na API)
+### 3.5 Configuração do ElasticNet (Grid Search)
 
-A função realiza *grid search* sobre dois hiperparâmetros do ElasticNet:
+Diferente de versões anteriores, o grid search agora é opcional e controlado diretamente pelos parâmetros `alpha` e `l1_ratio`. Se listas forem fornecidas, a função testará todas as combinações e selecionará o modelo que minimizar o erro e maximizar a correlação.
 
-| Hiperparâmetro | Grid | Significado |
+| Hiperparâmetro | Padrão Sugerido | Significado |
 |:---|:---|:---|
-| `alpha` | `[0.001, 0.01, 0.1]` | Intensidade da regularização. Valores menores → menos penalização → mais controles sobrevivem. |
-| `l1_ratio` | `[0.2, 0.5, 0.8]` | Balanço entre L1 (Lasso, esparsidade) e L2 (Ridge, suavidade). Valores altos → mais esparsidade → menos controles. |
+| `alpha` | `0.01` | Intensidade da regularização. Valores menores → menos penalização → mais controles sobrevivem. |
+| `l1_ratio` | `0.5` | Balanço entre esparsidade e suavidade. Valores altos → mais esparsidade → menos controles. |
 
-Isso gera uma grade de $3 \times 3 = 9$ configurações avaliadas **para cada combinação de tratamento**. Apenas o melhor resultado local (menor `std_residual`) é retido por combinação.
+Isso gera uma grade de $3 \times 3 = 9$ configurações avaliadas **para cada combinação de tratamento**. Apenas o melhor resultado local (menor `ser`) é retido por combinação.
 
 
 ---
@@ -275,7 +276,7 @@ O ranking retorna **um único grupo de tratamento** composto pelos top-k geos in
 O modo automático decide entre exaustivo e ranking com base na cardinalidade do problema:
 
 ```python
-if C(n, k) > 1000:
+if C(n, k) > 2000:
     usar "ranking"
 else:
     usar "exhaustive"
@@ -392,7 +393,7 @@ O resíduo é $e_t = y_t - \hat{y}_t$, e as métricas computadas são:
 
 ### 5.6 Seleção do melhor hiperparâmetro local
 
-Dentro das 9 configurações do grid ElasticNet, apenas o candidato com **menor `std_residual`** é retido para representar aquela combinação de tratamento. Isso significa que cada combinação de geos contribui com exatamente um resultado para o ranqueamento global.
+Dentro das 9 configurações do grid ElasticNet, apenas o candidato com **menor `ser`** é retido para representar aquela combinação de tratamento. Isso significa que cada combinação de geos contribui com exatamente um resultado para o ranqueamento global.
 
 
 ---
@@ -472,7 +473,7 @@ onde a minimização é feita por enumeração (exaustivo) ou por heurística gu
     "correlation":          float,        # ρ ∈ [-1, 1] (Pearson, espaço log-diff)
     "std_residual":         float,        # σ_e ≥ 0 (espaço log-diff)
     "rmspe":                float,        # RMSPE ≥ 0 (espaço log-diff)
-    "synthetic_error_ratio": float,       # SER = σ_e / (ρ + 1e-6)
+    "ser":                  float,        # SER = σ_e / (ρ + 1e-6)
     "n_controls":           int,          # Nº de controles pré-poda CVXPY
     "alpha":                float,        # Melhor α do ElasticNet
     "l1_ratio":             float         # Melhor λ₁ do ElasticNet
@@ -605,6 +606,7 @@ clusters = discover_geo_clusters(
     date_col="data",
     n_treatment=2,
     search_mode="exhaustive",
+    n_jobs=None,
     verbose=True
 )
 ```
@@ -642,7 +644,7 @@ clusters[0]
 #     "control_weights": [0.72, 0.28],
 #     "correlation": 0.9450,
 #     "std_residual": 0.0310,
-#     "synthetic_error_ratio": 0.0328,
+#     "ser": 0.0328,
 #     "n_controls": 2,
 #     "alpha": 0.01,
 #     "l1_ratio": 0.5

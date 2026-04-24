@@ -186,7 +186,12 @@ def _estimate_series_params(t, y, n_components=3):
                 'seasonality_components': [], 'noise_std': 0.0}
 
     # 1. Detrend for frequency discovery
-    slope_init, intercept_init = np.polyfit(t, y, 1)
+    # Use only the recent tail for slope estimation — avoids long historical
+    # downward trends collapsing the post-test simulation to near zero.
+    trend_window = max(30, N // 4)
+    t_tail = t[-trend_window:]
+    y_tail = y[-trend_window:]
+    slope_init, intercept_init = np.polyfit(t_tail, y_tail, 1)
     y_dt = y - (slope_init * t + intercept_init)
 
     # 2. Discover peaks via FFT
@@ -247,7 +252,14 @@ def _estimate_series_params(t, y, n_components=3):
         y_pred = X @ coeffs
         residuals = y - y_pred
         noise_std = float(np.std(residuals))
-        
+
+        # Cap amplitude of each component to 1 std of the series.
+        # FFT on short series (< 1 year) often assigns huge amplitudes to
+        # long-period artefacts that swing the projection far below zero.
+        y_std = float(np.std(y))
+        for comp in components:
+            comp['amplitude'] = min(comp['amplitude'], y_std)
+
         return {
             'trend_slope': float(final_slope),
             'intercept': float(final_intercept),
@@ -266,8 +278,10 @@ def _estimate_series_params(t, y, n_components=3):
 
 def generate_simulated_intervention(
     filepath,
-    days,
     treatment_geos,
+    days=None,
+    start_date=None,
+    end_date=None,
     lift=0.05,
     date_col="date",
     trend_slope=None,
@@ -291,8 +305,11 @@ def generate_simulated_intervention(
 
     Parameters:
         filepath (str): Path to pre-test CSV file.
-        days (int): Number of days to simulate in the post-intervention period.
         treatment_geos (list): Geographies to receive the lift.
+        days (int, optional): Number of days to simulate. Required if start_date/end_date not given.
+        start_date (str, optional): Start date of the post-test period (e.g. '2026-01-01').
+        end_date (str, optional): End date of the post-test period (e.g. '2026-04-10').
+            If start_date and end_date are provided, days is computed automatically (inclusive).
         lift (float or list): Lift amount (constant or random range [min, max]).
         date_col (str): Column name for dates.
         trend_slope (float or None): Trend slope. If None, auto-inferred per geography.
@@ -318,74 +335,53 @@ def generate_simulated_intervention(
     last_date = df_pre[date_col].iloc[-1]
     geos = [c for c in df_pre.columns if c != date_col]
 
-    # 2. Setup Post-Test Timeline
-    # The new t starts from n_pre
-    t_post = np.arange(n_pre, n_pre + days)
-    new_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days, freq="D")
-    
-    df_post = pd.DataFrame({date_col: new_dates})
-    
+    # 2. Resolve post-test duration
+    if start_date is not None and end_date is not None:
+        sd = pd.to_datetime(start_date)
+        ed = pd.to_datetime(end_date)
+        days = (ed - sd).days + 1  # inclusive
+        new_dates = pd.date_range(start=sd, end=ed, freq="D")
+    elif days is not None:
+        new_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days, freq="D")
+    else:
+        raise ValueError("Provide either 'days' or both 'start_date' and 'end_date'.")
+
+    post_cols = {date_col: new_dates}
+
     np.random.seed(random_seed)
-    t_pre = np.arange(n_pre)
 
     for geo_name in geos:
-        y_pre = df_pre[geo_name].values.astype(float)
+        y_pre_geo = df_pre[geo_name].values.astype(float)
+        dates_pre  = pd.to_datetime(df_pre[date_col])
 
-        # --- Parameter Estimation (auto-infer from pre-test data) ---
-        params = _estimate_series_params(t_pre, y_pre)
-        
-        # Determine components to use
-        # If manual overrides exist, we use a single component logic
-        if seasonality_period is not None or seasonality_amplitude is not None:
-            geo_period = params['seasonality_components'][0]['period'] if seasonality_period is None else seasonality_period
-            geo_amplitude = params['seasonality_components'][0]['amplitude'] if seasonality_amplitude is None else seasonality_amplitude
-            geo_phase = -np.pi / 2 if (seasonality_period is not None or seasonality_amplitude is not None) else params['seasonality_components'][0]['phase']
-            
-            use_components = [{
-                'period': geo_period,
-                'amplitude': geo_amplitude,
-                'phase': geo_phase
-            }]
+        # ── Weekday-Mean Forecast ─────────────────────────────────────────────
+        # For each weekday (0=Mon … 6=Sun), compute the mean of every
+        # pre-test observation that fell on that day.  The post-test baseline
+        # for each future date is simply its corresponding weekday mean.
+        # This preserves weekly seasonality without any parametric model or
+        # external dependencies.
+        dow_series = pd.Series(y_pre_geo, index=dates_pre)
+        dow_means  = dow_series.groupby(dow_series.index.dayofweek).mean()
+
+        # Per-weekday residuals → estimate realistic noise
+        dow_aligned = dates_pre.dt.dayofweek.map(dow_means)
+        residuals   = y_pre_geo - dow_aligned.values
+        if noise_std is not None:
+            if isinstance(noise_std, (list, tuple)) and len(noise_std) == 2:
+                geo_noise_std = float(np.random.uniform(noise_std[0], noise_std[1]))
+            else:
+                geo_noise_std = float(noise_std)
         else:
-            use_components = params['seasonality_components']
+            geo_noise_std = float(np.std(residuals))
 
-        # Intercept and Trend
-        geo_slope = params['trend_slope'] if trend_slope is None else trend_slope
-        if trend_slope is None:
-            geo_intercept = params['intercept']
-        else:
-            # Re-calculate intercept based on manual slope to preserve the end-point continuity as best as possible
-            t_last = n_pre - 1
-            last_trend_val = geo_slope * t_last
-            last_seas_val = sum(c['amplitude'] * np.cos(2 * np.pi * t_last / c['period'] + c['phase']) for c in use_components)
-            geo_intercept = y_pre[-1] - (last_trend_val + last_seas_val)
+        # Build post-test baseline
+        post_dows = pd.to_datetime(new_dates).dayofweek
+        baseline  = np.array([dow_means.get(d, np.mean(y_pre_geo)) for d in post_dows])
 
-        # Noise: use estimated or explicit
-        if noise_std is not None and (isinstance(noise_std, (int, float)) and noise_std == 0):
-            geo_noise_std = 0.0
-        elif noise_std is None:
-            geo_noise_std = params['noise_std']
-        elif isinstance(noise_std, (list, tuple)) and len(noise_std) == 2:
-            geo_noise_std = np.random.uniform(noise_std[0], noise_std[1])
-        else:
-            geo_noise_std = noise_std
-
-        # --- Generate Post Series ---
-        trend = geo_slope * t_post
-        
-        seasonality = np.zeros_like(t_post, dtype=float)
-        for comp in use_components:
-            seasonality += comp['amplitude'] * np.cos(2 * np.pi * t_post / comp['period'] + comp['phase'])
-            
-        noise = np.random.normal(0, geo_noise_std, len(t_post)) if geo_noise_std > 0 else np.zeros_like(t_post)
-
-        # Smooth transition: correct for model-data gap at the boundary
-        # Using the actual last pre-value vs what the sum of trend+seas+intercept predicts
-        last_predicted = (geo_slope * (n_pre - 1) + geo_intercept +
-                          sum(c['amplitude'] * np.cos(2 * np.pi * (n_pre - 1) / c['period'] + c['phase']) for c in use_components))
-        correction = y_pre[-1] - last_predicted
-
-        series = geo_intercept + trend + seasonality + noise + correction
+        noise  = (np.random.normal(0, geo_noise_std, days)
+                  if geo_noise_std > 0 else np.zeros(days))
+        series = baseline + noise
+        series = np.maximum(series, 0.0)  # volumes can't be negative
 
         # Apply Lift
         if geo_name in treatment_geos:
@@ -398,7 +394,10 @@ def generate_simulated_intervention(
         if as_integer:
             series = np.round(series).astype(int)
 
-        df_post[geo_name] = series
+        post_cols[geo_name] = series
+
+
+    df_post = pd.DataFrame(post_cols)
 
     # 3. Combine
     df_full = pd.concat([df_pre, df_post], ignore_index=True)
@@ -412,7 +411,7 @@ def generate_simulated_intervention(
                 plt.plot(df_full[date_col], df_full[col], linestyle="--", alpha=0.6)
 
         plt.axvline(last_date, color="black", linestyle=":", label="simulated intervention start")
-        plt.legend()
+        plt.legend(loc='upper left')
         plt.title(f"Simulated Intervention ({days} days)")
         plt.show()
 

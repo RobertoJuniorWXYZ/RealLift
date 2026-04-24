@@ -14,13 +14,28 @@ def design_of_experiments(
     pct_treatment: float | list = None,
     fixed_treatment: list = None,
     mde: float = None,
-    experiment_days: int | list = [21, 60],
+    experiment_days: int | list = [21, 28, 30, 35],
     n_folds: int = 5,
     search_mode: str = "ranking",
     experiment_type: str = "synthetic_control",
+    use_elasticnet: bool = False,
+    n_jobs: int = None,
     verbose: bool = True
 ) -> dict
 ```
+
+## Parâmetros Principais
+
+| Parâmetro | Tipo | Default | Descrição |
+|:---|:---|:---|:---|
+| `filepath` | `str` | **Obrigatório** | Caminho para o arquivo CSV com os dados históricos. |
+| `date_col` | `str` | **Obrigatório** | Nome da coluna de data. |
+| `pct_treatment` | `float` \| `list` | `[0.1, 0.2, 0.3]` | Porcentagem(ns) de geos para tratamento (ex: `0.2` para 20%). |
+| `experiment_days` | `list` | `[21, 28, 30, 35]` | Janelas de tempo para cálculo do MDE. |
+| `use_elasticnet` | `bool` | `False` | Se `True`, utiliza ElasticNet para pré-filtragem de doadores (recomendado para alta dimensionalidade). |
+| `n_jobs` | `int` | `None` | Número de processos paralelos para o screening inicial. |
+| `experiment_type` | `str` | `"synthetic_control"` | Tipo de modelo: `"synthetic_control"` ou `"matched_did"`. |
+
 
 ## Arquitetura da Pipeline (Design Level)
 
@@ -34,10 +49,11 @@ Para embasar a viabilidade do teste, a pipeline processa metadados pré-interven
 
 O terminal exibe um relatório detalhado para cada cenário (ex: 10%, 20% de tratamento) incluindo:
 
-- **EXPERIMENTAL SCOPE**: Mostra a cobertura total do mercado (Geos Distintos / Total de Geos).
-- **TEST POOL**: Lista as unidades geográficas selecionadas para receber o tratamento.
+- **EXPERIMENTAL SCOPE**: Mostra a cobertura total do mercado (Geos Distintos, Tratamentos e Controles distintos / Total de Geos).
+- **TEST POOL**: Lista as unidades geográficas selecionadas para receber o tratamento (nomes exibidos integralmente, sem truncamento).
 - **CONTROL DESIGN (DONOR POOL & WEIGHTS)**: Exibe cada cluster com seus respectivos geos doadores e pesos de importância. Útil para detectar se o modelo está equilibrado.
-- **MDE COMPARISON**: Uma tabela final comparando todos os cenários para facilitar a escolha da sensibilidade ideal.
+- **CROSS-VALIDATION SUMMARY**: Tabela com métricas de backtesting por cluster (R² Treino/Teste, MAPE e WAPE), com largura de colunas dinâmica ajustada ao nome mais longo.
+- **MDE COMPARISON**: Tabela final comparando todos os cenários. Inclui as colunas: `Distinct` (total de geos distintos), **`Controls`** (controles distintos por cenário), `MDE`, `R²`, `MAPE` e `WAPE` (em formato percentual).
 
 ## Retorno (*Output*)
 

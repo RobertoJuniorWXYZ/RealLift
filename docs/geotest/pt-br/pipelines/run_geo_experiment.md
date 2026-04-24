@@ -47,6 +47,26 @@ Uma das maiores vantagens da `run_geo_experiment` é a capacidade de ler diretam
 5. **Placebo Robusto (`run_placebo_tests`)**: Aplica testes exatos de permutação sobre os controles para calcular a **Razão MSPE** e atestar que a quebra de tendência é singular e não um efeito cíclico do mercado. Mantém total coerência metodológica espelhando o método de cálculo do Passo 4.
 6. **Diagnósticos Visuais**: Renderiza gráficos de séries temporais, lift acumulado e distribuição de placebo.
 
+## Relatório Verbose
+
+Com `verbose=True`, a função imprime no terminal:
+
+- **CROSS-VALIDATION SUMMARY**: Métricas de backtesting por cluster (R² Treino/Teste, MAPE Treino/Teste e WAPE Treino/Teste), com largura de colunas dinâmica ajustada ao nome de geo mais longo — sem truncamento.
+- **CLUSTER-LEVEL INCREMENTAL IMPACT**: Tabela consolidada do resultado final, com uma linha por cluster. Todas as colunas numéricas se adaptam ao tamanho dos dados:
+
+| Coluna | Descrição |
+|:---|:---|
+| `Treatment` | Nome completo do geo tratado (sem truncamento) |
+| `Observed` | Soma observada no pós-teste |
+| `Synthetic` / `Matched` | Soma do contrafactual no pós-teste |
+| `Lift (%)` | Lift percentual |
+| `Lift (abs)` | Lift absoluto |
+| `CI 95% (%)` | Intervalo de confiança percentual (Bootstrap) |
+| `CI 95% (abs)` | Intervalo de confiança absoluto (Bootstrap) |
+| `Sig` | Significância estatística (`[Yes]` / `[No]`) |
+| `Causal` | Causalidade via placebo (`[Yes]` / `[No]`) |
+| `MDE@Nd` | Efeito Mínimo Detectável para N dias de experimento |
+
 ## Retorno (*Output*)
 
 ```python
