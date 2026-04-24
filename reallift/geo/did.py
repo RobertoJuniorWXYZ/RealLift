@@ -15,6 +15,7 @@ def run_matched_did(
     end_date=None,
     random_state=None,
     cluster_idx=None,
+    conf_level=0.95,
     plot=True,
     verbose=True
 ) -> dict:
@@ -22,6 +23,21 @@ def run_matched_did(
     Run Matched Differences-in-Differences (DiD) analysis.
     This module strictly uses uniform weighting across the donor pool 
     without convex optimization, adhering to classic parallel-trends properties.
+
+    Parameters:
+        filepath (str): Path to CSV file.
+        date_col (str): Date column name.
+        treatment_geo (str or list): Treatment geography or list of geographies.
+        control_geos (list): Control geographies.
+        treatment_start_date (str): Treatment start date, separating pre-test and post-test periods.
+        treatment_end_date (str): Treatment end date (analysis window end).
+        start_date (str): YYYY-MM-DD date when analysis begins (optional).
+        end_date (str): YYYY-MM-DD date when analysis ends (optional).
+        random_state (int or np.random.Generator): Random state for reproducible permutations.
+        cluster_idx (int or str): Optional cluster index for logging traceability.
+        conf_level (float): Confidence level for bootstrap (default: 0.95).
+        plot (bool): Whether to plot the baseline graph.
+        verbose (bool): Whether to print verbose logging results.
     """
     df = pd.read_csv(filepath)
     df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
@@ -108,7 +124,7 @@ def run_matched_did(
         post_mspe = np.mean(effect**2)
 
         # Bootstrap
-        boot_result = bootstrap_significance(effect, post_synth, random_state=random_state)
+        boot_result = bootstrap_significance(effect, post_synth, conf_level=conf_level, random_state=random_state)
 
     if verbose:
         header = "=== GEO MATCHED DID ==="
@@ -141,11 +157,11 @@ def run_matched_did(
 
         print(f"\n{boot_header}")
         print(f"Total lift (abs): {lift_total:.2f}")
-        print(f"95% CI (abs): [{boot_result['ci_lower_total_abs']:.2f}, {boot_result['ci_upper_total_abs']:.2f}]")
+        print(f"{conf_level:.0%} CI (abs): [{boot_result['ci_lower_total_abs']:.2f}, {boot_result['ci_upper_total_abs']:.2f}]")
         
         total_lift_pct = lift_total / post_synth.sum()
         print(f"Total lift (%): {total_lift_pct*100:.2f}%")
-        print(f"95% CI (%): [{boot_result['ci_lower_total_pct']*100:.2f}%, {boot_result['ci_upper_total_pct']*100:.2f}%]")
+        print(f"{conf_level:.0%} CI (%): [{boot_result['ci_lower_total_pct']*100:.2f}%, {boot_result['ci_upper_total_pct']*100:.2f}%]")
         print(f"p-value (bootstrap): {boot_result['p_value_boot']:.4f}")
 
         if boot_result['ci_lower_total_abs'] > 0 or boot_result['ci_upper_total_abs'] < 0:

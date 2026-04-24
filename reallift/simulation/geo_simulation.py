@@ -383,6 +383,16 @@ def generate_simulated_intervention(
         series = baseline + noise
         series = np.maximum(series, 0.0)  # volumes can't be negative
 
+        # ── Smooth Transition (Interpolation) ────────────────────────────
+        # Linearly blend the first few post-test days from the last
+        # pre-test value into the weekday-mean forecast, avoiding the
+        # abrupt discontinuity that can cause division-by-zero downstream.
+        last_pre_value = float(y_pre_geo[-1])
+        blend_window   = min(7, days)          # one full weekly cycle
+        for i in range(blend_window):
+            alpha     = (i + 1) / (blend_window + 1)
+            series[i] = last_pre_value * (1.0 - alpha) + series[i] * alpha
+
         # Apply Lift
         if geo_name in treatment_geos:
             if isinstance(lift, (list, tuple)) and len(lift) == 2:

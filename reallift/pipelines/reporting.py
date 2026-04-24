@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy.stats import norm as _norm
 
-def print_experiment_summary(results, date_col, experiment_type="synthetic_control", random_state=None):
+def print_experiment_summary(results, date_col, experiment_type="synthetic_control", conf_level=0.95, random_state=None):
     """
     Renders the final impact tables and consolidated results in the terminal.
     
@@ -109,10 +109,10 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
 
         lift_pct_str = f"{lift_pct*100:.2f}%"
         ci_str       = f"[{ci_l_pct*100:.2f}%, {ci_u_pct*100:.2f}%]"
-        ci_abs_str   = f"[{ci_l_abs:.1f}, {ci_u_abs:.1f}]"
-        obs_str      = f"{post_real_sum:.2f}"
-        syn_str      = f"{post_synth_sum:.2f}"
-        abs_str      = f"{lift_abs:.2f}"
+        ci_abs_str   = f"[{ci_l_abs:,.1f}, {ci_u_abs:,.1f}]"
+        obs_str      = f"{post_real_sum:,.2f}"
+        syn_str      = f"{post_synth_sum:,.2f}"
+        abs_str      = f"{lift_abs:,.2f}"
         sig_str      = "[Yes]" if sig_flag   else "[No]"
         cau_str      = "[Yes]" if causal_flag else "[No]"
 
@@ -126,13 +126,16 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
         ci_uppers_abs.append(ci_u_abs)
 
     # ── Dynamic widths ──
+    ci_pct_label = f"CI {conf_level:.0%} (%)"
+    ci_abs_label = f"CI {conf_level:.0%} (abs)"
+    
     treat_w   = max(len("Treatment"),  max(len(r[1])  for r in rows_data))
     obs_w     = max(len("Observed"),   max(len(r[2])  for r in rows_data))
     syn_w     = max(len(synth_label),  max(len(r[3])  for r in rows_data))
     lpct_w    = max(len("Lift (%)"),   max(len(r[4])  for r in rows_data))
     labs_w    = max(len("Lift (abs)"), max(len(r[5])  for r in rows_data))
-    cipct_w   = max(len("CI 95% (%)"),max(len(r[6])  for r in rows_data))
-    ciabs_w   = max(len("CI 95% (abs)"), max(len(r[7]) for r in rows_data))
+    cipct_w   = max(len(ci_pct_label), max(len(r[6])  for r in rows_data))
+    ciabs_w   = max(len(ci_abs_label), max(len(r[7])  for r in rows_data))
     sig_w     = max(len("Sig"),    5)
     cau_w     = max(len("Causal"), 6)
     mde_w     = max(len(mde_col_label), max(len(r[10]) for r in rows_data))
@@ -141,7 +144,7 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
     header = (f"{'Cluster':<7}{sep}{'Treatment':<{treat_w}}{sep}"
               f"{'Observed':<{obs_w}}{sep}{synth_label:<{syn_w}}{sep}"
               f"{'Lift (%)':<{lpct_w}}{sep}{'Lift (abs)':<{labs_w}}{sep}"
-              f"{'CI 95% (%)':<{cipct_w}}{sep}{'CI 95% (abs)':<{ciabs_w}}{sep}"
+              f"{ci_pct_label:<{cipct_w}}{sep}{ci_abs_label:<{ciabs_w}}{sep}"
               f"{'Sig':<{sig_w}}{sep}{'Causal':<{cau_w}}{sep}{mde_col_label}")
     dyn_w = len(header) + 2
     TABLE_W = max(TABLE_W, dyn_w)
@@ -182,18 +185,24 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
             consolidated_post_synth += res["synthetic"]["plotting_data"]["post_synth"]
             
         consolidated_effect = consolidated_post_real - consolidated_post_synth
-        cons_boot = bootstrap_significance(consolidated_effect, consolidated_post_synth, random_state=random_state)
+        cons_boot = bootstrap_significance(consolidated_effect, consolidated_post_synth, conf_level=conf_level, random_state=random_state)
         
         agg_ci_l_abs = cons_boot["ci_lower_total_abs"]
         agg_ci_u_abs = cons_boot["ci_upper_total_abs"]
         agg_ci_l_pct = cons_boot["ci_lower_total_pct"]
         agg_ci_u_pct = cons_boot["ci_upper_total_pct"]
+        
+        # MMM Calibration metrics: Standard Deviation of the bootstrap distribution
+        agg_std_abs = cons_boot["boot_totals_abs"].std()
+        agg_std_pct = cons_boot["boot_totals_pct"].std()
     except Exception:
         # Fallback to sum of bounds
         agg_ci_l_abs = sum(ci_lowers_abs)
         agg_ci_u_abs = sum(ci_uppers_abs)
         agg_ci_l_pct = agg_ci_l_abs / sum_synth if sum_synth != 0 else 0.0
         agg_ci_u_pct = agg_ci_u_abs / sum_synth if sum_synth != 0 else 0.0
+        agg_std_abs = 0.0
+        agg_std_pct = 0.0
     
     # Consolidated MDE — average of per-cluster residuals (matching DoE consolidated mode)
     try:
@@ -240,10 +249,12 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
     print(f"  {expected_label:<33}: {sum_synth:,.2f}")
     print(f"  --------------------------------------------------")
     print(f"  {'INCREMENTAL ABSOLUTE LIFT':<33}: {sum_lift:,.2f}")
-    print(f"  {'95% Confidence Interval (abs)':<33}: [{agg_ci_l_abs:,.1f}, {agg_ci_u_abs:,.1f}]")
+    print(f"  {f'{conf_level:.0%} Confidence Interval (abs)':<33}: [{agg_ci_l_abs:,.1f}, {agg_ci_u_abs:,.1f}]")
+    print(f"  {'Standard Deviation (abs)':<33}: {agg_std_abs:,.2f}")
     print(f"  --------------------------------------------------")
     print(f"  {'INCREMENTAL PERCENTUAL LIFT':<33}: {agg_lift_pct*100:.2f}%")
-    print(f"  {'95% Confidence Interval (%)':<33}: [{agg_ci_l_pct*100:.2f}%, {agg_ci_u_pct*100:.2f}%]")
+    print(f"  {f'{conf_level:.0%} Confidence Interval (%)':<33}: [{agg_ci_l_pct*100:.2f}%, {agg_ci_u_pct*100:.2f}%]")
+    print(f"  {'Standard Deviation (%)':<33}: {agg_std_pct*100:.2f}%")
     
     final_sig = "[Yes] Statistically Significant" if (agg_ci_l_abs > 0 or agg_ci_u_abs < 0) else "[No] Not Statistically Significant"
     print(f"\n  Result: {final_sig}\n")

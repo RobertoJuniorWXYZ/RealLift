@@ -1,7 +1,7 @@
 import numpy as np
 from ..config.defaults import DEFAULT_N_BOOT
 
-def bootstrap_significance(effect, post_synth, n_boot=DEFAULT_N_BOOT, random_state=None) -> dict:
+def bootstrap_significance(effect, post_synth, n_boot=DEFAULT_N_BOOT, conf_level=0.95, random_state=None) -> dict:
     """
     Perform bootstrap significance testing.
 
@@ -9,6 +9,7 @@ def bootstrap_significance(effect, post_synth, n_boot=DEFAULT_N_BOOT, random_sta
         effect (np.ndarray): Effect array.
         post_synth (np.ndarray): Post-treatment synthetic values.
         n_boot (int): Number of bootstrap samples.
+        conf_level (float): Confidence level (default: 0.95).
         random_state (int or np.random.Generator): Random state for reproducibility.
 
     Returns:
@@ -51,15 +52,19 @@ def bootstrap_significance(effect, post_synth, n_boot=DEFAULT_N_BOOT, random_sta
     boot_totals_abs = np.array(boot_totals_abs)
     boot_totals_pct = np.array(boot_totals_pct)
 
-    ci_lower_abs = np.percentile(boot_means_abs, 2.5)
-    ci_upper_abs = np.percentile(boot_means_abs, 97.5)
-    ci_lower_pct = np.percentile(boot_means_pct, 2.5)
-    ci_upper_pct = np.percentile(boot_means_pct, 97.5)
+    alpha = 1.0 - conf_level
+    lower_p = (alpha / 2.0) * 100
+    upper_p = (1.0 - alpha / 2.0) * 100
+
+    ci_lower_abs = np.percentile(boot_means_abs, lower_p)
+    ci_upper_abs = np.percentile(boot_means_abs, upper_p)
+    ci_lower_pct = np.percentile(boot_means_pct, lower_p)
+    ci_upper_pct = np.percentile(boot_means_pct, upper_p)
     
-    ci_lower_total_abs = np.percentile(boot_totals_abs, 2.5)
-    ci_upper_total_abs = np.percentile(boot_totals_abs, 97.5)
-    ci_lower_total_pct = np.percentile(boot_totals_pct, 2.5)
-    ci_upper_total_pct = np.percentile(boot_totals_pct, 97.5)
+    ci_lower_total_abs = np.percentile(boot_totals_abs, lower_p)
+    ci_upper_total_abs = np.percentile(boot_totals_abs, upper_p)
+    ci_lower_total_pct = np.percentile(boot_totals_pct, lower_p)
+    ci_upper_total_pct = np.percentile(boot_totals_pct, upper_p)
 
     p_value_boot = 2 * min(
         np.mean(boot_means_abs <= 0),

@@ -24,8 +24,11 @@ def run_geo_experiment(
     experiment_days=[21, 60],
     n_folds=5,
     random_state=None,
+    conf_level=0.95,
     plot=True,
-    verbose=True
+    verbose=True,
+    ignore_treatment_start=False,
+    ignore_treatment_end=False
 ) -> dict:
     """
     Run a complete GeoLift experiment analysis pipeline.
@@ -49,10 +52,26 @@ def run_geo_experiment(
         random_state (int or np.random.Generator): Random seed for reproducibility.
         plot (bool): Whether to plot final graphical diagnostics.
         verbose (bool): Whether to print comprehensive terminal logging results.
+        ignore_treatment_start (bool): If True, shifts the treatment start date
+            forward by 1 day. Useful when the first day of intervention contains
+            contamination (e.g., partial activation, ramp-up effects).
+        ignore_treatment_end (bool): If True, shifts the treatment end date
+            backward by 1 day. Useful when the last day of intervention contains
+            contamination (e.g., partial deactivation, residual exposure).
 
     Returns:
         dict: Complete experiment analysis results by cluster and consolidated.
     """
+    # Apply boundary exclusion offsets
+    if ignore_treatment_start:
+        treatment_start_date = (pd.to_datetime(treatment_start_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        if verbose:
+            print(f"[Info] ignore_treatment_start=True → effective start shifted to {treatment_start_date}")
+
+    if ignore_treatment_end and treatment_end_date is not None:
+        treatment_end_date = (pd.to_datetime(treatment_end_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        if verbose:
+            print(f"[Info] ignore_treatment_end=True → effective end shifted to {treatment_end_date}")
     # 1. Determine clusters
     if doe is not None and scenario is not None:
         if verbose:
@@ -162,6 +181,7 @@ def run_geo_experiment(
                 end_date=end_date,
                 random_state=random_state,
                 cluster_idx=i,
+                conf_level=conf_level,
                 plot=False,
                 verbose=verbose
             )
@@ -177,6 +197,7 @@ def run_geo_experiment(
                 end_date=end_date,
                 random_state=random_state,
                 cluster_idx=i,
+                conf_level=conf_level,
                 plot=False,
                 verbose=verbose
             )
@@ -243,7 +264,7 @@ def run_geo_experiment(
 
     if verbose and len(results) > 0:
         experiment_type = doe.get("experiment_type", "synthetic_control") if doe is not None else "synthetic_control"
-        print_experiment_summary(results, date_col, experiment_type=experiment_type, random_state=random_state)
+        print_experiment_summary(results, date_col, experiment_type=experiment_type, conf_level=conf_level, random_state=random_state)
 
     return {
         "summary": {
