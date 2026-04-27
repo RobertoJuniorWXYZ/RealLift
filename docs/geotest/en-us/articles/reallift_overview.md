@@ -48,7 +48,33 @@ graph TD
 
 ---
 
-## 4. Strategic Advantages
+## 4. Theoretical Boundaries & Mitigations (Causal Architecture)
+
+The RealLift *framework* was developed to operate at the state of the art in causal inference. However, we acknowledge the fundamental limits of the *Rubin Causal Model* and adopt conscious mitigations:
+
+### A. SUTVA Violation (Interference / Spillover)
+The algorithm assumes the absence of cross-contamination between regions. National campaigns or intercity mobility violate the premise of isolated treatment.
+- **Mitigation (Pre-Processing):** Spillover filtering must occur before modeling via *Ring Fences* (intentional exclusion of adjacent micro-regions or those under the same media radius). It is assumed that the data matrix provided to `design_of_experiments` has limited or negligible interference.
+
+### B. Temporal Ignorability (Unobserved Structural Shocks)
+The Achilles heel of Synthetic Controls are local exogenous shocks occurring *only* in the test period (e.g., local flood, strong action by regional competition).
+- **Mitigation:** Strict operational governance (a log of regional events) is required. The algorithm was designed with flexible windows to allow the retroactive purging of anomalous periods. Additionally, the model enables indirect systemic control by diversified donors, absorbing non-geolocated macroeconomic shocks.
+
+### C. Selection-Induced Bias (Adaptive Selection)
+By using the historical series both to search for cities (*Greedy Search*) and to validate generalized error (*OOF*), one incurs the subtle risk of *selection-induced bias* (optimizing to pass the backtest).
+- **Mitigation (OOF + OOS):** We actively chose not to isolate a blind final validation sample to maximize the learning window of *data-starved* markets. Adaptive bias is mitigated by the restrictions of the *Convex Solver* (preventing unrestrained extrapolation) and by the final penalization layer with multivariate *Out-of-Sample* tests.
+
+### D. Aggregation Bias and Parallel Trends
+Control groups built in isolation can exhibit tiny positive noises that, when added into a basket (e.g., 7 clusters), generate a massive additive bias, circumventing individual thresholds.
+- **Mitigation:** The iterative DoE process introduces **Consolidated Out-of-Sample validation**. The algorithm "merges" the baselines of all approved candidates and tests for *Consolidated Ghost Lift*. Any new city that injects systemic additive bias into the global control group is summarily discarded, preserving the law of multivariate *Generalized Parallel Trends*.
+
+### E. Time Series Variance (Moving Block Bootstrap)
+Traditional *i.i.d Bootstrap* underestimates the variance of autocorrelated retail data, generating dangerous false positives by creating artificial samples with absurd weekly imbalances (e.g., 15 Sundays in a month).
+- **Mitigation:** We implemented the **Moving Block Bootstrap**. The algorithm self-calibrates the sampling block size ($b=7$ to neutralize the day-of-the-week cycle), ensuring confidence intervals anchored to the authentic weekly variance of the market, resulting in highly punitive barriers against causal False Positives.
+
+---
+
+## 5. Strategic Advantages
 
 ### Corporate Transparency
 By maintaining Convex Weights ($\sum w = 1$), RealLift allows executives to understand exactly the composition of the control group. There is no "black box": incremental profit is derived from a direct and explainable comparison.

@@ -19,6 +19,7 @@ def design_of_experiments(
     search_mode: str = "ranking",
     experiment_type: str = "synthetic_control",
     use_elasticnet: bool = False,
+    check_ghost_lift: bool = True,
     n_jobs: int = None,
     verbose: bool = True
 ) -> dict
@@ -31,19 +32,21 @@ def design_of_experiments(
 | `filepath` | `str` | **Required** | Path to the CSV file with historical data. |
 | `date_col` | `str` | **Required** | Name of the date column. |
 | `pct_treatment` | `float` \| `list` | `[0.1, 0.2, 0.3]` | Percentage(s) of geos for treatment (e.g., `0.2` for 20%). |
-| `experiment_days` | `list` | `[21, 28, 30, 35]` | Time windows for MDE calculation. |
+| `experiment_days` | `list` | `[21, 28, 30, 35]` | Time windows for MDE calculation and Out-of-Sample testing. |
 | `use_elasticnet` | `bool` | `False` | If `True`, uses ElasticNet for donor pre-filtering (recommended for high dimensionality). |
+| `check_ghost_lift`| `bool` | `True` | If `True`, runs the *Consolidated OOS Check* (Block Bootstrap) to reject control groups with aggregation bias. |
 | `n_jobs` | `int` | `None` | Number of parallel processes for initial screening. |
 | `experiment_type` | `str` | `"synthetic_control"` | Model type: `"synthetic_control"` or `"matched_did"`. |
 
 
-## Pipeline Architecture (Design Level)
+## Pipeline Architecture (Causal Level)
 
-To support test feasibility, the pipeline processes pre-intervention metadata by orchestrating three pillars:
+To support test feasibility with frontier statistical rigor, the pipeline orchestrates four main pillars of defense:
 
-1. **Optimal Clustering (`discover_geo_clusters`)**: Identifies the best combinations of geos for treatment and control. In `synthetic_control` mode, it uses ElasticNet convex optimization. In `matched_did` mode, it groups based solely on the average correlation metric under identical weights (1/N).
-2. **Pragmatic Evaluation (`validate_geo_clusters`)**: Runs Cross-Validation (Backtesting) on rolling windows to ensure holistic stability.
-3. **Requirement Calculation (`estimate_duration`)**: Projects the MDE (Minimum Detectable Effect) for different durations (e.g., 21, 30, 60 days), allowing the choice of the scenario with the best cost-benefit ratio.
+1. **Optimal Clustering (`discover_geo_clusters`)**: Identifies the best combinations via L2 convex optimization (ElasticNet), ensuring native Level Normalization to anchor zero-means.
+2. **Pragmatic OOF Evaluation (`validate_geo_clusters`)**: Runs Cross-Validation (Multi-cut Backtesting) on rolling windows (TimeSeriesSplit) to ensure R² stability without overfitting.
+3. **Consolidated OOS Ghost Lift**: The great differentiator of the *framework*. Tests the global control group in *Out-of-Sample* mode, using **Moving Block Bootstrap** (to adjust for temporal autocorrelation). Immediately rejects candidates that induce systemic *aggregation bias* in the pool.
+4. **Requirement Calculation (`estimate_duration`)**: Projects the MDE (Minimum Detectable Effect) for different durations (e.g., 21, 30, 60 days), consolidating the safest scenario against false positives.
 
 ## Technical Report (*Verbosity*)
 

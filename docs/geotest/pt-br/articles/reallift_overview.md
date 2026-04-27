@@ -48,7 +48,33 @@ graph TD
 
 ---
 
-## 4. Vantagens Estratégicas
+## 4. Limites Teóricos e Mitigações (Arquitetura Causal)
+
+O *framework* RealLift foi desenvolvido para operar no estado da arte da inferência causal. Contudo, reconhecemos os limites fundamentais do *Rubin Causal Model* e adotamos mitigações conscientes:
+
+### A. Violação da SUTVA (Interferência / Spillover)
+O algoritmo pressupõe ausência de contaminação cruzada entre regiões. Campanhas de abrangência nacional ou mobilidade interurbana violam a premissa de tratamento isolado.
+- **Mitigação (Pre-Processing):** A filtragem do *spillover* deve ocorrer antes da modelagem via *Ring Fences* (exclusão intencional de microrregiões adjacentes ou sob o mesmo raio midiático). Assume-se que a matriz de dados fornecida ao `design_of_experiments` possui interferência limitadada ou negligenciável.
+
+### B. Ignorabilidade Temporal (Choques Estruturais Não Observados)
+O calcanhar de Aquiles de Controles Sintéticos são choques locais exógenos ocorrendo *apenas* no período de teste (ex: enchente local, forte ação de concorrência regional).
+- **Mitigação:** É necessária uma governança operacional estrita (diário de bordo de eventos regionais). O algoritmo foi desenhado com janelas flexíveis para permitir o expurgo retroativo de períodos anômalos. Adicionalmente, o modelo viabiliza o controle sistêmico indireto por doadores diversificados, absorvendo os choques macroeconômicos não geolocalizados.
+
+### C. Viés de Seleção Adaptativa
+Ao usar a série histórica tanto para buscar as cidades (*Greedy Search*) quanto para validar o erro generalizado (*OOF*), incorre-se no risco sutil de *selection-induced bias* (otimizar para passar no teste de backtest).
+- **Mitigação (OOF + OOS):** Optamos ativamente por não isolar uma amostra cega de validação final para maximizar a janela de aprendizado de mercados limitados por dados (*data-starved*). O viés adaptativo é mitigado pelas restrições do *Convex Solver* (impossibilitando extrapolação desgovernada) e pela camada de penalização final com testes multivariados *Out-of-Sample*.
+
+### D. Viés de Agregação e Parallel Trends
+Grupos de controle construídos isoladamente podem exibir ruídos positivos minúsculos que, ao serem somados numa cesta (7 clusters, por exemplo), geram um viés aditivo massivo, burlando os limiares individuais.
+- **Mitigação:** O processo iterativo do DoE introduz a validação **Out-of-Sample Consolidada**. O algoritmo "funde" as linhas base de todos os candidatos aprovados e testa o *Consolidated Ghost Lift*. Qualquer cidade nova que injete um viés aditivo sistêmico no grupo de controle global é sumariamente descartada, preservando a lei dos *Generalized Parallel Trends* multivariados.
+
+### E. Variância de Séries Temporais (Moving Block Bootstrap)
+O *Bootstrap i.i.d* tradicional subestima a variância de dados autocorrelacionados do varejo, gerando falsos positivos perigosos ao criar amostras artificiais com desbalanceamento semanal absurdo (ex: 15 domingos no mês).
+- **Mitigação:** Implementamos o **Moving Block Bootstrap**. O algoritmo autocalibra o tamanho dos blocos de amostragem ($b=7$ para neutralizar o ciclo de dias da semana), garantindo intervalos de confiança ancorados à variância semanal autêntica do mercado, resultando em barreiras altamente punitivas contra Falsos Positivos causais.
+
+---
+
+## 5. Vantagens Estratégicas
 
 ### Transparência Corporativa
 Ao manter Pesos Convexos ($\sum w = 1$), o RealLift permite que executivos entendam exatamente a composição do grupo de controle. Não há "caixa preta": o lucro incremental é derivado de uma comparação direta e explicável.

@@ -19,6 +19,7 @@ def design_of_experiments(
     search_mode: str = "ranking",
     experiment_type: str = "synthetic_control",
     use_elasticnet: bool = False,
+    check_ghost_lift: bool = True,
     n_jobs: int = None,
     verbose: bool = True
 ) -> dict
@@ -31,19 +32,21 @@ def design_of_experiments(
 | `filepath` | `str` | **Obrigatório** | Caminho para o arquivo CSV com os dados históricos. |
 | `date_col` | `str` | **Obrigatório** | Nome da coluna de data. |
 | `pct_treatment` | `float` \| `list` | `[0.1, 0.2, 0.3]` | Porcentagem(ns) de geos para tratamento (ex: `0.2` para 20%). |
-| `experiment_days` | `list` | `[21, 28, 30, 35]` | Janelas de tempo para cálculo do MDE. |
+| `experiment_days` | `list` | `[21, 28, 30, 35]` | Janelas de tempo para cálculo do MDE e testes Out-of-Sample. |
 | `use_elasticnet` | `bool` | `False` | Se `True`, utiliza ElasticNet para pré-filtragem de doadores (recomendado para alta dimensionalidade). |
+| `check_ghost_lift`| `bool` | `True` | Se `True`, executa o *Consolidated OOS Check* (Block Bootstrap) para rejeitar grupos de controle com viés de agregação. |
 | `n_jobs` | `int` | `None` | Número de processos paralelos para o screening inicial. |
 | `experiment_type` | `str` | `"synthetic_control"` | Tipo de modelo: `"synthetic_control"` ou `"matched_did"`. |
 
 
-## Arquitetura da Pipeline (Design Level)
+## Arquitetura da Pipeline (Causal Level)
 
-Para embasar a viabilidade do teste, a pipeline processa metadados pré-intervenção orquestrando três pilares:
+Para embasar a viabilidade do teste com rigor estatístico de fronteira, a pipeline orquestra quatro pilares principais de defesa:
 
-1. **Agrupamento Ótimo (`discover_geo_clusters`)**: Identifica as melhores combinações de geos para tratamento e controle. No modo `synthetic_control`, utiliza otimização convexa ElasticNet. No modo `matched_did`, agrupa baseando-se unicamente na métrica de correlação média sob pesos idênticos (1/N).
-2. **Avaliação Pragmática (`validate_geo_clusters`)**: Executa Cross-Validation (Backtesting) em janelas rolantes para garantir a estabilidade holística.
-3. **Cálculo de Requisitos (`estimate_duration`)**: Projeta o MDE (Efeito Mínimo Detectável) para diferentes durações (ex: 21, 30, 60 dias), permitindo escolher o cenário com melhor custo-benefício.
+1. **Agrupamento Ótimo (`discover_geo_clusters`)**: Identifica as melhores combinações via otimização convexa L2 (ElasticNet), garantindo Level Normalization nativo para ancoragem de médias nulas.
+2. **Avaliação Pragmática OOF (`validate_geo_clusters`)**: Executa Cross-Validation (Backtesting Multi-cut) em janelas rolantes (TimeSeriesSplit) para garantir a estabilidade do R² sem overfitting.
+3. **Ghost Lift Consolidado OOS**: O grande diferencial do *framework*. Testa o grupo de controle global em modo *Out-of-Sample*, utilizando o **Moving Block Bootstrap** (para ajustar a autocorrelação temporal). Rejeita imediatamente candidatos que induzam *viés de agregação* sistêmico no pool.
+4. **Cálculo de Requisitos (`estimate_duration`)**: Projeta o MDE (Efeito Mínimo Detectável) para diferentes durações (ex: 21, 30, 60 dias), consolidando o cenário mais seguro contra falsos positivos.
 
 ## Relatório Técnico (*Verbosity*)
 
