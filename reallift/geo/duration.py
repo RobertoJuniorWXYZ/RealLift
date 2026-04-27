@@ -213,9 +213,7 @@ def estimate_duration(
             }
         )
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # PER-CLUSTER MODE: regression with optimized controls
-    # ═══════════════════════════════════════════════════════════════════════
+    # ── PER-CLUSTER MODE: regression with optimized controls ────────────────
     if control_geos is None:
         raise ValueError("control_geos is required when consolidated=False")
 
@@ -226,40 +224,55 @@ def estimate_duration(
     controls_df = df[control_geos]
     std_naive = treatment.std()
 
+    # Standard diagnostics (Simple Control Mean)
     control_mean = controls_df.mean(axis=1)
     corr = treatment.corr(control_mean)
+    std_residual_simple = (treatment - control_mean).std()
 
-    residual_simple = treatment - control_mean
-    std_residual_simple = residual_simple.std()
+    # Step A: Prepare Features with structure removal (Trend + Weekday)
+    # We use log-diff as the base transform for stationarity
+    df_transformed = np.log(pd.concat([treatment, df[control_geos]], axis=1)).diff().dropna()
+    y = df_transformed.iloc[:, 0].values
+    X_controls = df_transformed.iloc[:, 1:].values
+    
+    # Add structure: Trend and Day-of-Week dummies
+    n_obs = len(y)
+    dates_transformed = df[date_col].iloc[1:]
+    dow_dummies = pd.get_dummies(dates_transformed.dt.dayofweek, prefix='dow', drop_first=True).values
+    trend = np.arange(n_obs).reshape(-1, 1)
+    
+    X = np.hstack([X_controls, trend, dow_dummies])
 
-    if isinstance(treatment_geo, list):
-        df_log_diff = np.log(pd.concat([treatment, df[control_geos]], axis=1)).diff().dropna()
-        y = df_log_diff.iloc[:, 0].values
-        X = df_log_diff.iloc[:, 1:].values
-    else:
-        df_transformed = np.log(df[[treatment_geo] + control_geos]).diff().dropna()
-        y = df_transformed[treatment_geo].values
-        X = df_transformed[control_geos].values
-
-    if control_weights is not None and len(control_weights) == X.shape[1]:
-        y_pred = X @ np.array(control_weights)
+    if control_weights is not None and len(control_weights) == X_controls.shape[1]:
+        # If we have weights, we only use the controls for prediction, 
+        # but residuals should still account for structure.
+        y_pred = X_controls @ np.array(control_weights)
         std_residual_reg = (y - y_pred).std()
         r_squared = float(np.corrcoef(y, y_pred)[0, 1])**2 if np.std(y) > 0 and np.std(y_pred) > 0 else 0.0
     else:
+        # Standard OLS to find the best possible fit (potential overfit check needed)
         model = LinearRegression()
         model.fit(X, y)
         y_pred = model.predict(X)
         std_residual_reg = (y - y_pred).std()
         r_squared = model.score(X, y)
+    
+    # Safety: Penalize MDE if R2 is too high (avoiding the "too good to be true" trap)
+    if r_squared > 0.95:
+        std_residual_reg *= (1 + (r_squared - 0.95) * 5) # Gradual penalty
 
     residual_reg = y - y_pred
 
-    # Autocorrelation correction: compute lag-1 autocorrelation of residuals
-    # to adjust effective sample size for serial dependence in daily data
+    # Step B: Autocorrelation correction (Effective Sample Size)
+    # Compute lag-1 autocorrelation of residuals.
+    # We use a robust approach: if rho is positive, it reduces n_eff.
     rho1 = pd.Series(residual_reg).autocorr(lag=1)
     if np.isnan(rho1) or rho1 < 0:
-        rho1 = 0.0  # Conservative: no correction if negative or undefined
-    ac_factor = (1 - rho1) / (1 + rho1)  # n_eff = n * ac_factor
+        rho1 = 0.0  
+    
+    # n_eff correction factor: captures how much information we ACTUALLY have.
+    # Highly correlated series have much higher variance in means.
+    ac_factor = (1 - rho1) / (1 + rho1)  
 
     return _compute_and_report(
         mde=mde,

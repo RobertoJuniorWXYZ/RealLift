@@ -74,7 +74,9 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
 
         sig_flag    = (ci_l_abs > 0 or ci_u_abs < 0)
         placebo_p   = res["placebo"]["p_value"]
-        causal_flag = placebo_p <= 0.10
+        
+        # A lift is only causal if it is both statistically significant AND passes the placebo test
+        causal_flag = sig_flag and (placebo_p <= 0.10)
 
         # MDE calculation — matching DoE methodology (log-diff regression with weights)
         df_syn     = syn["df"]
@@ -99,9 +101,17 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
             w_vals   = np.array([syn["weights"][g] for g in ctrl_geos])
             y_pred_ld = X_ld @ w_vals
             sigma    = (y_ld - y_pred_ld).std()
+            
+            r_squared = float(np.corrcoef(y_ld, y_pred_ld)[0, 1])**2 if np.std(y_ld) > 0 and np.std(y_pred_ld) > 0 else 0.0
+            if r_squared > 0.95:
+                sigma *= (1 + (r_squared - 0.95) * 5)
+                
+            rho1 = pd.Series(y_ld - y_pred_ld).autocorr(lag=1)
+            if np.isnan(rho1) or rho1 < 0: rho1 = 0.0
+            ac_factor = (1 - rho1) / (1 + rho1)
 
             n_days      = post_days if post_len > 0 else 21
-            delta_log   = (_z_alpha + _z_beta) * sigma / np.sqrt(n_days)
+            delta_log   = (_z_alpha + _z_beta) * sigma / np.sqrt(n_days * ac_factor)
             cluster_mde = np.exp(delta_log) - 1
             mde_str     = f"{cluster_mde*100:.2f}%"
         except Exception:
@@ -236,8 +246,12 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
         mean_residuals = residuals_df.mean(axis=1)
         sigma_cons = mean_residuals.std()
         
+        rho1_cons = mean_residuals.autocorr(lag=1)
+        if np.isnan(rho1_cons) or rho1_cons < 0: rho1_cons = 0.0
+        ac_factor_cons = (1 - rho1_cons) / (1 + rho1_cons)
+        
         n_days_cons = post_days if post_len > 0 else 21
-        delta_cons = (_z_alpha + _z_beta) * sigma_cons / np.sqrt(n_days_cons)
+        delta_cons = (_z_alpha + _z_beta) * sigma_cons / np.sqrt(n_days_cons * ac_factor_cons)
         consolidated_mde = np.exp(delta_cons) - 1
         cons_mde_str = f"{consolidated_mde*100:.2f}%"
     except Exception:

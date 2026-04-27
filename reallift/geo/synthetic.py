@@ -216,10 +216,19 @@ def run_synthetic_control(
         }
     }
 
-def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result):
+def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effect, post_real, post_synth, effect_pct, boot_result, log_scale=False):
     """
     Generate plots for synthetic control analysis.
     """
+    import matplotlib.ticker as ticker
+    
+    def human_format(x, pos):
+        if abs(x) >= 1e9: return f'{x/1e9:.1f}B'
+        if abs(x) >= 1e6: return f'{x/1e6:.1f}M'
+        if abs(x) >= 1e3: return f'{x/1e3:.1f}k'
+        return f'{x:,.0f}'
+    
+    formatter = ticker.FuncFormatter(human_format)
     date_col = df.columns[0] # Assuming first col is date as per common usage
     
     geo_name = ", ".join(treatment_geo) if isinstance(treatment_geo, list) else treatment_geo
@@ -231,6 +240,9 @@ def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effec
     plt.title(f"GeoLift - Synthetic Control ({geo_name})")
     plt.xlabel("Date")
     plt.ylabel("Value")
+    if log_scale:
+        plt.yscale('symlog')
+    plt.gca().yaxis.set_major_formatter(formatter)
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.xticks(rotation=45)
@@ -242,17 +254,10 @@ def plot_synthetic_control(df, treatment_geo, treatment_idx, y, synthetic, effec
     plt.axhline(0, linestyle="--")
     plt.title("Lift (Treatment - Synthetic)")
     plt.xlabel("Date")
+    plt.gca().yaxis.set_major_formatter(formatter)
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.xticks(rotation=45)
     plt.tight_layout()
-    plt.show()
-
-    baseline = post_synth.mean()
-    observed = post_real.mean()
-    plt.figure(figsize=(6,5))
-    plt.bar(["Synthetic", "Real"], [baseline, observed])
-    plt.title("Average Outcome (Post Period)")
-    plt.ylabel("Value")
     plt.show()
 
     plt.figure(figsize=(8,5))

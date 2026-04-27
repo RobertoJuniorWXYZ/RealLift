@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
 
 def generate_geo_data(
     start_date="2022-01-01",
@@ -290,9 +291,11 @@ def generate_simulated_intervention(
     noise_std=None,
     random_seed=42,
     plot=True,
+    log_scale=False,
     save_csv=False,
     file_name="simulated_intervention.csv",
-    as_integer=False
+    as_integer=False,
+    verbose=False
 ) -> pd.DataFrame:
     """
     Generate a simulated post-intervention period by extending an existing CSV dataset.
@@ -335,6 +338,72 @@ def generate_simulated_intervention(
     last_date = df_pre[date_col].iloc[-1]
     geos = [c for c in df_pre.columns if c != date_col]
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # REAL HISTORY MODE (days < 0)
+    # Uses the last abs(days) of the pre-test data as the intervention period.
+    # ═══════════════════════════════════════════════════════════════════════
+    if days is not None and days < 0:
+        n_sim = abs(days)
+        if n_sim >= len(df_pre):
+            raise ValueError(f"History too short ({len(df_pre)} days) for a {n_sim}-day backtest.")
+        
+        # Split data
+        df_real_pre = df_pre.iloc[:-n_sim].copy()
+        df_real_post = df_pre.iloc[-n_sim:].copy()
+        
+        # Apply Lift to treatment geos in the real-post slice
+        for geo in geos:
+            if geo in treatment_geos:
+                if isinstance(lift, (list, tuple)) and len(lift) == 2:
+                    current_lift = np.random.uniform(lift[0], lift[1])
+                else:
+                    current_lift = lift
+                df_real_post[geo] = df_real_post[geo] * (1 + current_lift)
+                
+                if as_integer:
+                    df_real_post[geo] = np.round(df_real_post[geo]).astype(int)
+
+        df_full = pd.concat([df_real_pre, df_real_post], ignore_index=True)
+        
+        if verbose:
+            start_int = df_real_post[date_col].iloc[0]
+            end_int = df_real_post[date_col].iloc[-1]
+            print(f"\n>>> SIMULATION MODE: REAL HISTORY BACKTEST")
+            print(f">>> Intervention Period: {start_int} to {end_int} ({n_sim} days)")
+        
+        if plot:
+            import matplotlib.ticker as ticker
+            def human_format(x, pos):
+                if abs(x) >= 1e9: return f'{x/1e9:.1f}B'
+                if abs(x) >= 1e6: return f'{x/1e6:.1f}M'
+                if abs(x) >= 1e3: return f'{x/1e3:.1f}k'
+                return f'{x:,.0f}'
+            formatter = ticker.FuncFormatter(human_format)
+
+            plt.figure(figsize=(14, 6))
+            last_date_pre = df_real_pre[date_col].iloc[-1]
+            for col in geos:
+                if col in treatment_geos:
+                    plt.plot(df_full[date_col], df_full[col], label=f"{col} (treated)", linewidth=2)
+                else:
+                    plt.plot(df_full[date_col], df_full[col], linestyle="--", alpha=0.6)
+
+            plt.axvline(last_date_pre, color="black", linestyle=":", label="real history intervention start")
+            if log_scale:
+                plt.yscale('symlog', linthresh=1e5)
+            plt.gca().yaxis.set_major_formatter(formatter)
+            plt.legend(loc='upper left')
+            plt.title(f"Simulated Intervention (Backtest: {n_sim} real days)")
+            plt.show()
+
+        if save_csv:
+            df_full.to_csv(file_name, index=False)
+
+        return df_full
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FORECAST MODE (days > 0)
+    # ═══════════════════════════════════════════════════════════════════════
     # 2. Resolve post-test duration
     if start_date is not None and end_date is not None:
         sd = pd.to_datetime(start_date)
@@ -347,6 +416,12 @@ def generate_simulated_intervention(
         raise ValueError("Provide either 'days' or both 'start_date' and 'end_date'.")
 
     post_cols = {date_col: new_dates}
+    
+    if verbose:
+        start_int = new_dates[0].strftime('%Y-%m-%d')
+        end_int = new_dates[-1].strftime('%Y-%m-%d')
+        print(f"\n>>> SIMULATION MODE: FORECAST PROJECTION")
+        print(f">>> Intervention Period: {start_int} to {end_int} ({len(new_dates)} days)")
 
     np.random.seed(random_seed)
 
@@ -354,34 +429,28 @@ def generate_simulated_intervention(
         y_pre_geo = df_pre[geo_name].values.astype(float)
         dates_pre  = pd.to_datetime(df_pre[date_col])
 
-        # ── Weekday-Mean Forecast ─────────────────────────────────────────────
-        # For each weekday (0=Mon … 6=Sun), compute the mean of every
-        # pre-test observation that fell on that day.  The post-test baseline
-        # for each future date is simply its corresponding weekday mean.
-        # This preserves weekly seasonality without any parametric model or
-        # external dependencies.
-        dow_series = pd.Series(y_pre_geo, index=dates_pre)
-        dow_means  = dow_series.groupby(dow_series.index.dayofweek).mean()
-
-        # Per-weekday residuals → estimate realistic noise
-        dow_aligned = dates_pre.dt.dayofweek.map(dow_means)
-        residuals   = y_pre_geo - dow_aligned.values
+        # ── 7-Day Moving Average Baseline ─────────────────────────────────────
+        # Constant baseline based on the most recent week of pre-test data.
+        baseline_val = float(np.mean(y_pre_geo[-7:]))
+        
+        # Structural Noise: Standard deviation of residuals from a 7-day rolling mean
+        # to capture the typical daily volatility around the trend.
+        rolling_mean = pd.Series(y_pre_geo).rolling(window=7).mean().bfill()
+        residuals    = y_pre_geo - rolling_mean.values
+        recent_res   = residuals[-60:] if len(residuals) > 60 else residuals
+        
         if noise_std is not None:
             if isinstance(noise_std, (list, tuple)) and len(noise_std) == 2:
                 geo_noise_std = float(np.random.uniform(noise_std[0], noise_std[1]))
             else:
                 geo_noise_std = float(noise_std)
         else:
-            geo_noise_std = float(np.std(residuals))
+            geo_noise_std = float(np.std(recent_res))
 
-        # Build post-test baseline
-        post_dows = pd.to_datetime(new_dates).dayofweek
-        baseline  = np.array([dow_means.get(d, np.mean(y_pre_geo)) for d in post_dows])
-
-        noise  = (np.random.normal(0, geo_noise_std, days)
-                  if geo_noise_std > 0 else np.zeros(days))
-        series = baseline + noise
-        series = np.maximum(series, 0.0)  # volumes can't be negative
+        # Generate Forecast (Flat baseline + structural noise)
+        current_noise = np.random.normal(0, geo_noise_std, days) if geo_noise_std > 0 else np.zeros(days)
+        series = np.full(days, baseline_val) + current_noise
+        series = np.maximum(series, 0.0) # Ensure non-negative values
 
         # ── Smooth Transition (Interpolation) ────────────────────────────
         # Linearly blend the first few post-test days from the last
@@ -413,6 +482,14 @@ def generate_simulated_intervention(
     df_full = pd.concat([df_pre, df_post], ignore_index=True)
 
     if plot:
+        import matplotlib.ticker as ticker
+        def human_format(x, pos):
+            if abs(x) >= 1e9: return f'{x/1e9:.1f}B'
+            if abs(x) >= 1e6: return f'{x/1e6:.1f}M'
+            if abs(x) >= 1e3: return f'{x/1e3:.1f}k'
+            return f'{x:,.0f}'
+        formatter = ticker.FuncFormatter(human_format)
+
         plt.figure(figsize=(14, 6))
         for col in geos:
             if col in treatment_geos:
@@ -421,6 +498,11 @@ def generate_simulated_intervention(
                 plt.plot(df_full[date_col], df_full[col], linestyle="--", alpha=0.6)
 
         plt.axvline(last_date, color="black", linestyle=":", label="simulated intervention start")
+        if log_scale:
+            # linthresh=1e5 (100k) allows seeing smaller series linearly up to 100k, 
+            # then goes log for the millions.
+            plt.yscale('symlog', linthresh=1e5)
+        plt.gca().yaxis.set_major_formatter(formatter)
         plt.legend(loc='upper left')
         plt.title(f"Simulated Intervention ({days} days)")
         plt.show()

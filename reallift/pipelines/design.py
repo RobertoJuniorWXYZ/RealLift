@@ -7,6 +7,93 @@ from ..config.defaults import DEFAULT_TREATMENT_PCTS, DEFAULT_EXPERIMENT_DAYS
 from .shared import _run_oof_refinement_single
 from .reporting import _print_scenario_table, _build_comparison, _print_comparison_table
 from ..utils.reporting import generate_doe_report
+from ..geo.bootstrap import bootstrap_significance
+import cvxpy as cp
+
+def _check_ghost_lift_oos(clusters, df_pre, date_col, experiment_days):
+    """
+    Out-of-Sample Backtest for Ghost Lift detection.
+    
+    Splits the pre-treatment period into Train ([:-d]) and Test ([-d:]) datasets to simulate
+    an active experiment period of size `d`. Uses a strictly convex, level-normalized Synthetic 
+    Control optimization to prevent bias offset extrapolation.
+    
+    Supports single cluster or a list of clusters for Multivariate/Consolidated Ghost Lift checking.
+    When a list of clusters is provided, it predicts the combined synthetic baseline and compares
+    it against the combined observed series, mitigating aggregation-induced bias.
+    
+    Returns True if a Ghost Lift is detected (i.e., Moving Block Bootstrap confidence interval
+    does not cross zero) for any of the requested experiment_days horizons.
+    """
+    if not isinstance(clusters, list):
+        clusters = [clusters]
+        
+    if not isinstance(experiment_days, (list, tuple)):
+        eval_sizes = [int(experiment_days)]
+    else:
+        eval_sizes = sorted(int(d) for d in experiment_days)
+        
+    for d in eval_sizes:
+        if d >= len(df_pre) - 5: # Need enough training data
+            continue
+            
+        train_df = df_pre.iloc[:-d]
+        test_df = df_pre.iloc[-d:]
+        
+        y_test_total = np.zeros(d)
+        y_pred_total = np.zeros(d)
+        
+        for cluster in clusters:
+            treat_cols = cluster["treatment"]
+            controls = cluster["control"]
+            
+            if len(controls) == 0:
+                continue
+                
+            y_train = train_df[treat_cols].mean(axis=1).values.astype(float)
+            X_train = train_df[controls].values.astype(float)
+            
+            # Train
+            y_mean_train = y_train.mean() if y_train.mean() != 0 else 1e-10
+            X_mean_train = X_train.mean(axis=0)
+            X_mean_train[X_mean_train == 0] = 1e-10
+            
+            y_norm_train = y_train / y_mean_train
+            X_norm_train = X_train / X_mean_train
+            
+            w_syn = cp.Variable(X_norm_train.shape[1])
+            obj_syn = cp.Minimize(cp.sum_squares(y_norm_train - (X_norm_train @ w_syn)))
+            cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
+            prob_syn = cp.Problem(obj_syn, cons_syn)
+            try:
+                prob_syn.solve(solver=cp.SCS, verbose=False)
+                w_vals = np.array(w_syn.value).flatten()
+                w_vals[w_vals < 0] = 0.0
+                sum_w = np.sum(w_vals)
+                if sum_w > 0:
+                    w_vals = w_vals / sum_w
+            except Exception:
+                w_vals = np.ones(X_norm_train.shape[1]) / X_norm_train.shape[1]
+            
+            # Test
+            y_test = test_df[treat_cols].mean(axis=1).values.astype(float)
+            X_test = test_df[controls].values.astype(float)
+            
+            X_norm_test = X_test / X_mean_train
+            y_pred = (X_norm_test @ w_vals) * y_mean_train
+            
+            y_test_total += y_test
+            y_pred_total += y_pred
+            
+        # Only run bootstrap if there's non-zero predictions
+        if np.sum(y_pred_total) > 0:
+            effect = y_test_total - y_pred_total
+            boot = bootstrap_significance(effect, y_pred_total, random_state=42)
+            
+            if boot["ci_lower_total_pct"] > 0 or boot["ci_upper_total_pct"] < 0:
+                return True # Ghost Lift detected
+            
+    return False # Passed all horizons
 
 def design_of_experiments(
     filepath,
@@ -22,6 +109,7 @@ def design_of_experiments(
     search_mode="ranking",
     experiment_type="synthetic_control",
     use_elasticnet=False,
+    check_ghost_lift=True,
     n_jobs=None,
     verbose=True,
     save_pdf=False,
@@ -35,6 +123,17 @@ def design_of_experiments(
     percentages (default: 10%, 20%, 30%), running cluster discovery and duration
     estimation for each. Displays a comparative MDE table to help decide the
     optimal trade-off between sensitivity and intervention cost.
+    
+    Includes robust multivariate evaluation: Time-Series Cross-Validation (OOF) 
+    combined with a strict Consolidated Out-of-Sample (OOS) Ghost Lift detection 
+    to ensure the absence of structural aggregation bias.
+    
+    Parameters:
+        ...
+        check_ghost_lift (bool): If True, strictly enforces the OOS Ghost Lift check 
+            on both individual candidates and the consolidated group. Any candidate 
+            that induces an additive bias across the synthetic portfolio is rejected.
+            Default is True.
     """
     valid_types = ["synthetic_control", "matched_did"]
     if experiment_type not in valid_types:
@@ -89,47 +188,47 @@ def design_of_experiments(
         print("=" * 70)
         print(f"\nTotal geos available: {n_geos}")
         print(f"Scenarios to evaluate: {len(scenario_configs)}")
-        print(f"Search mode: {search_mode}")
         print(f"Pre-treatment period: {pre_start} → {end_date}")
         print(f"Experiment duration: {experiment_days}\n")
+        
+        # Info about OOS Backtest
+        if check_ghost_lift:
+            print(f"  [Info] OOS Backtest will validate Ghost Lifts across ALL requested horizons at the end of the historical series.\n")
+        else:
+            print(f"  [Warning] OOS Ghost Lift validation is DISABLED.\n")
 
-    # 3. Global screening (only for ranking mode)
+    # 3. Global Base Ranking
     max_n_treat = max(c["n_treatment"] for c in scenario_configs)
     has_fixed = any(c["fixed"] for c in scenario_configs)
 
     global_ranking = None
     if not has_fixed and search_mode == "ranking":
         from reallift.geo.discovery import _evaluate_combinations
-
-        if verbose:
-            print("Screening all geos individually...")
-
-        df_screen = pd.read_csv(filepath)
-        df_screen[date_col] = pd.to_datetime(df_screen[date_col], format='mixed', dayfirst=True, errors='coerce')
-        df_screen = df_screen.dropna(subset=[date_col])
+        
+        df_rank = pd.read_csv(filepath)
+        df_rank[date_col] = pd.to_datetime(df_rank[date_col], format='mixed', dayfirst=True, errors='coerce')
+        df_rank = df_rank.dropna(subset=[date_col])
         if start_date:
-            df_screen = df_screen[df_screen[date_col] >= pd.to_datetime(start_date)]
+            df_rank = df_rank[df_rank[date_col] >= pd.to_datetime(start_date)]
         if end_date:
-            df_screen = df_screen[df_screen[date_col] <= pd.to_datetime(end_date)]
-        df_screen = df_screen.groupby(date_col).sum(numeric_only=True).reset_index()
-        df_screen = df_screen.sort_values(date_col).reset_index(drop=True)
-
-        alpha_grid = [0.01]
-        l1_grid = [0.5]
-
-        phase1_combos = [[g] for g in geos]
-        phase1_results = _evaluate_combinations(
-            df_screen, geos, phase1_combos,
+            df_rank = df_rank[df_rank[date_col] <= pd.to_datetime(end_date)]
+        df_rank = df_rank.groupby(date_col).sum(numeric_only=True).reset_index()
+        df_rank = df_rank.sort_values(date_col).reset_index(drop=True)
+        
+        if verbose: print("\n  Evaluating full historical data for global ranking...")
+        valid_combos = [[g] for g in geos]
+        phase1_results_full = _evaluate_combinations(
+            df_rank, geos, valid_combos,
             all_treatment_geos=set(),
             use_elasticnet=use_elasticnet,
-            alpha_grid=alpha_grid, l1_grid=l1_grid,
-            verbose=verbose, desc="Screening geos", n_jobs=n_jobs
+            alpha_grid=[0.01], l1_grid=[0.5],
+            verbose=False, desc="Ranking Geos", n_jobs=n_jobs
         )
-        phase1_results.sort(key=lambda x: x["ser"])
-        global_ranking = [r["treatment"][0] for r in phase1_results]
+        phase1_results_full.sort(key=lambda x: x["ser"])
+        global_ranking = [r["treatment"][0] for r in phase1_results_full]
 
         if verbose:
-            print(f"Global ranking (top {max_n_treat}): {global_ranking[:max_n_treat]}\n")
+            print(f"  Global ranking (top {max_n_treat}): {global_ranking[:max_n_treat]}\n")
 
     # 4. Run each scenario
     scenarios = []
@@ -208,8 +307,18 @@ def design_of_experiments(
                         continue
                     
                     best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
-                        current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type=experiment_type
+                        current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type
                     )
+                    
+                    ghost_lift = False
+                    if passed:
+                        if experiment_type != "matched_did":
+                            ghost_lift = _check_ghost_lift_oos(best_cluster, df_pre, date_col, experiment_days)
+                        if ghost_lift:
+                            passed = False
+                            
+                    if not passed:
+                        continue
                     
                     all_evals.append({
                         "raw": current_cluster, "best": best_cluster, "cv": best_cv_row,
@@ -297,6 +406,13 @@ def design_of_experiments(
                     
                     is_single = len(candidates_to_test) == 1
                     
+                    if verbose and not is_single:
+                        _flush_single_buffer(single_candidate_buffer, single_candidate_skips, len(locked_treatments))
+                        single_candidate_buffer.clear()
+                        single_candidate_skips.clear()
+                        cons_str = f" | {len(locked_treatments)} consolidated" if locked_treatments else ""
+                        print(f"    Iter {iteration} | Testing {len(candidates_to_test)} candidates{cons_str}", flush=True)
+                    
                     iter_results = []
                     
                     for candidate in candidates_to_test:
@@ -317,8 +433,14 @@ def design_of_experiments(
                             continue
                         
                         best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
-                            current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type=experiment_type
+                            current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type
                         )
+                        
+                        ghost_lift = False
+                        if passed and experiment_type != "matched_did" and check_ghost_lift:
+                            ghost_lift = _check_ghost_lift_oos(best_cluster, df_pre, date_col, experiment_days)
+                            if ghost_lift:
+                                passed = False
                         
                         r2_t = best_cv_row["r2_test"]
                         gap_t = best_cv_row["r2_train"] - r2_t
@@ -326,18 +448,48 @@ def design_of_experiments(
                         iter_results.append({
                             "candidate": candidate, "passed": passed,
                             "raw": current_cluster, "best": best_cluster, "cv": best_cv_row,
-                            "r2": r2_t, "gap": gap_t
+                            "r2": r2_t, "gap": gap_t, "ghost_lift": ghost_lift
                         })
+                        
+                        if verbose and not is_single:
+                            if passed:
+                                status = "Approved"
+                            else:
+                                if ghost_lift:
+                                    status = "GhostLift"
+                                elif best_cv_row is not None and r2_t >= 0.6:
+                                    status = "FailedR2  "
+                                else:
+                                    status = "Failed  "
+                            print(f"      [{status}] {candidate:<10} R²={r2_t:.4f}  Gap={gap_t:.4f}", flush=True)
                     
                     # Consolidate (lock) newly passed clusters
                     newly_passed = [r for r in iter_results if r.get("passed", False)]
                     newly_failed = [r for r in iter_results if not r.get("passed", False)]
                     
+                    # Sort by R2 to prioritize best candidates
+                    newly_passed.sort(key=lambda x: x["r2"], reverse=True)
+                    
                     for r in newly_passed:
-                        locked_clusters.append(r)
-                        locked_treatments.add(r["candidate"])
-                        if r.get("best"):
-                            locked_donors.update(r["best"].get("control", []))
+                        # Trial group (currently locked + this candidate)
+                        trial_clusters = [item["best"] for item in locked_clusters] + [r["best"]]
+                        
+                        consolidated_ghost_lift = False
+                        if experiment_type != "matched_did" and check_ghost_lift and len(trial_clusters) > 1:
+                            consolidated_ghost_lift = _check_ghost_lift_oos(trial_clusters, df_pre, date_col, experiment_days)
+                        
+                        if not consolidated_ghost_lift:
+                            locked_clusters.append(r)
+                            locked_treatments.add(r["candidate"])
+                            if r.get("best"):
+                                locked_donors.update(r["best"].get("control", []))
+                        else:
+                            # It caused a consolidated ghost lift, so we reject it
+                            r["passed"] = False
+                            r["ghost_lift"] = True
+                            newly_failed.append(r)
+                            if verbose and not is_single:
+                                print(f"      [Rejected] {r['candidate']} caused a CONSOLIDATED Ghost Lift!")
                     
                     all_failed.extend([r for r in newly_failed if r.get("best") is not None])
                     
@@ -367,21 +519,11 @@ def design_of_experiments(
                                     "passed": r.get("passed", False),
                                     "r2": r.get("r2", 0.0),
                                     "gap": r.get("gap", 0.0),
+                                    "ghost_lift": r.get("ghost_lift", False)
                                 })
                             single_candidate_skips.extend(iter_skipped)
                         else:
-                            # Flush any pending single-candidate buffer first
-                            _flush_single_buffer(single_candidate_buffer, single_candidate_skips, len(locked_treatments) - sum(1 for r in newly_passed))
-                            single_candidate_buffer.clear()
-                            single_candidate_skips.clear()
-                            
-                            # Print multi-candidate iteration
-                            cons_str = f" | {len(locked_treatments) - len(newly_passed)} consolidated" if locked_treatments - set(r["candidate"] for r in newly_passed) else ""
-                            print(f"    Iter {iteration} | Testing {len(candidates_to_test)} candidates{cons_str}")
-                            for r in iter_results:
-                                status = "Approved" if r.get("passed") else "Failed  "
-                                print(f"      [{status}] {r['candidate']:<10} R²={r.get('r2', 0):.4f}  Gap={r.get('gap', 0):.4f}")
-                            
+                            # Individual results were printed in real-time. Just print the footer.
                             n_cons = len(locked_clusters)
                             parts = [f"Consolidated {n_cons}"]
                             if iter_skipped:
@@ -497,8 +639,15 @@ def design_of_experiments(
                     eval_cluster = cluster.copy()
                     
                     best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
-                        eval_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_type=experiment_type
+                        eval_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type
                     )
+                    
+                    ghost_lift = False
+                    if passed:
+                        if experiment_type != "matched_did" and check_ghost_lift:
+                            ghost_lift = _check_ghost_lift_oos(best_cluster, df_pre, date_col, experiment_days)
+                        if ghost_lift:
+                            passed = False
                     
                     r2_t = best_cv_row["r2_test"]
                     gap_t = best_cv_row["r2_train"] - r2_t
@@ -508,19 +657,32 @@ def design_of_experiments(
                         if passed:
                             if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Optimal (R² = {r2_t:.4f}, Iters: {iters})")
                         else:
-                            if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Failed strict rules. Best R² = {r2_t:.4f}, Iters: {iters}")
+                            if ghost_lift:
+                                if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Failed: Ghost Lift Detected. Best R² = {r2_t:.4f}, Iters: {iters}")
+                            else:
+                                if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Failed strict rules. Best R² = {r2_t:.4f}, Iters: {iters}")
                             group_passed = False
                     else:
                         if passed:
                             if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Optimal (OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iters: {iters})")
                         else:
-                            if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Failed strict rules. (OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iters: {iters})")
+                            if ghost_lift:
+                                if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Failed: Ghost Lift Detected. (OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iters: {iters})")
+                            else:
+                                if verbose: print(f"      - Cluster {i} ({treat_str:<10}) Failed strict rules. (OOF R² = {r2_t:.4f}, Gap = {gap_t:.4f}, Iters: {iters})")
                             group_passed = False
                     
                     raw_items.append({
                         "raw": eval_cluster, "best": best_cluster,
                         "cv": best_cv_row, "passed": passed
                     })
+                
+                # Check for Consolidated Ghost Lift
+                if group_passed and experiment_type != "matched_did" and check_ghost_lift and len(raw_items) > 1:
+                    trial_clusters = [item["best"] for item in raw_items]
+                    if _check_ghost_lift_oos(trial_clusters, df_pre, date_col, experiment_days):
+                        group_passed = False
+                        if verbose: print(f"    [Group Rejected] CONSOLIDATED Ghost Lift detected!")
                 
                 # Keep track of the best group in case all fail
                 if best_raw_items is None or r2_sum > best_r2_sum:

@@ -6,6 +6,7 @@ from sklearn.metrics import r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from reallift.utils.metrics import mape, wape, compute_r2
 from reallift.config.defaults import DEFAULT_TRAIN_TEST_SPLIT
+from reallift.geo.bootstrap import bootstrap_significance
 
 def validate_geo_clusters(
     filepath,
@@ -16,6 +17,7 @@ def validate_geo_clusters(
     end_date=None,
     train_test_split=DEFAULT_TRAIN_TEST_SPLIT,
     n_folds=1,
+    test_size=None,
     plot=True,
     export_csv=False,
     output_prefix="geo_validation",
@@ -157,7 +159,16 @@ def validate_geo_clusters(
             # =========================
             # TIME SERIES CROSS-VALIDATION (OOF)
             # =========================
-            tscv = TimeSeriesSplit(n_splits=n_folds)
+            max_test_size = len(X) // (n_folds + 1)
+            
+            if isinstance(test_size, (list, tuple)):
+                req_test_size = int(test_size[0]) if len(test_size) > 0 else None
+            else:
+                req_test_size = int(test_size) if test_size is not None else None
+
+            actual_test_size = req_test_size if (req_test_size is not None and req_test_size <= max_test_size) else None
+            
+            tscv = TimeSeriesSplit(n_splits=n_folds, test_size=actual_test_size)
             y_pred_oof = np.full(len(y), np.nan)
             first_test_idx = 0
             
@@ -241,6 +252,7 @@ def validate_geo_clusters(
             
             split_line_idx = train_size
             is_test_array = [0]*train_size + [1]*test_size
+            
             header_name = "STATIC TREND VALIDATION"
             plot_title = f"Geo Validation (Static Trend) - {treatment}"
 
