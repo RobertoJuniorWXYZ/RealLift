@@ -353,9 +353,10 @@ def generate_cleaning_report(
             pw = WIDTH - 0.08
 
             # BEFORE
+            df_raw_sorted = df_raw.sort_values(by=date_col)
             ax1 = fig_v.add_axes([px, 0.53, pw, 0.34])
             for c in cols_plot:
-                ax1.plot(df_raw[date_col], df_raw[c], alpha=0.5, linewidth=0.8, label=c)
+                ax1.plot(df_raw_sorted[date_col], df_raw_sorted[c], alpha=0.5, linewidth=0.8, label=c)
             ax1.set_title("BEFORE IMPUTATION", fontsize=H3, fontweight='bold', color=C_RED, pad=10)
             ax1.grid(True, linestyle='--', alpha=0.12)
             ax1.yaxis.set_major_formatter(FuncFormatter(_human_fmt))
@@ -363,9 +364,10 @@ def generate_cleaning_report(
             ax1.tick_params(labelsize=CAPTION)
 
             # AFTER
+            df_cleaned_sorted = df_cleaned.sort_values(by=date_col)
             ax2 = fig_v.add_axes([px, 0.10, pw, 0.34])
             for c in cols_plot:
-                ax2.plot(df_cleaned[date_col], df_cleaned[c], alpha=0.5, linewidth=0.8, label=c)
+                ax2.plot(df_cleaned_sorted[date_col], df_cleaned_sorted[c], alpha=0.5, linewidth=0.8, label=c)
             ax2.set_title(f"AFTER IMPUTATION  ({imputation_method.upper()})", fontsize=H3, fontweight='bold', color=C_GREEN, pad=10)
             ax2.grid(True, linestyle='--', alpha=0.12)
             ax2.yaxis.set_major_formatter(FuncFormatter(_human_fmt))

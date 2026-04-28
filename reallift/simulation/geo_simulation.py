@@ -141,7 +141,7 @@ def generate_geo_data(
         df = df_pre.copy()
 
     if plot:
-        plt.figure(figsize=(14, 6))
+
         for i, col in enumerate(df.columns[1:]):
             if pre_only:
                 # Na fase pré-teste, todas as geos são baseline mas queremos identificá-las
@@ -380,7 +380,7 @@ def generate_simulated_intervention(
                 return f'{x:,.0f}'
             formatter = ticker.FuncFormatter(human_format)
 
-            plt.figure(figsize=(14, 6))
+
             last_date_pre = df_real_pre[date_col].iloc[-1]
             for col in geos:
                 if col in treatment_geos:
@@ -490,7 +490,7 @@ def generate_simulated_intervention(
             return f'{x:,.0f}'
         formatter = ticker.FuncFormatter(human_format)
 
-        plt.figure(figsize=(14, 6))
+
         for col in geos:
             if col in treatment_geos:
                 plt.plot(df_full[date_col], df_full[col], label=f"{col} (treated)", linewidth=2)

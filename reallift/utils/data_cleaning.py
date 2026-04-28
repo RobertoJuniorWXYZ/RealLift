@@ -98,6 +98,7 @@ def clean_geo_data(
     except Exception:
         df[date_col] = pd.to_datetime(df[date_col].astype(str))
         
+    df = df.groupby(date_col).sum(numeric_only=True).reset_index()
     df = df.sort_values(by=date_col).reset_index(drop=True)
 
     # ── 1.5 Period Filter ──
@@ -358,16 +359,18 @@ def clean_geo_data(
         fig, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
         
         # Plot Before (Raw)
+        df_raw_plot = df_raw.sort_values(by=date_col)
         for c in cols_to_plot:
-            axes[0].plot(df_raw[date_col], df_raw[c], alpha=0.7, label=c)
+            axes[0].plot(df_raw_plot[date_col], df_raw_plot[c], alpha=0.7, label=c)
         axes[0].set_title(f"Before Imputation (Top {len(cols_to_plot)} Geos)")
         axes[0].grid(True, linestyle='--', alpha=0.6)
         axes[0].yaxis.set_major_formatter(FuncFormatter(human_format))
         axes[0].legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small', ncol=1)
         
         # Plot After (Imputed)
+        df_plot = df.sort_values(by=date_col)
         for c in cols_to_plot:
-            axes[1].plot(df[date_col], df[c], alpha=0.7, label=c)
+            axes[1].plot(df_plot[date_col], df_plot[c], alpha=0.7, label=c)
         axes[1].set_title(f"After Imputation: '{imputation_method}'")
         axes[1].grid(True, linestyle='--', alpha=0.6)
         axes[1].yaxis.set_major_formatter(FuncFormatter(human_format))
