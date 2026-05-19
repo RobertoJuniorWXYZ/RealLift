@@ -3,7 +3,7 @@ import numpy as np
 import cvxpy as cp
 from reallift.geo.validation import validate_geo_clusters
 
-def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=None, experiment_type="synthetic_control"):
+def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=None, experiment_type="synthetic_control", df=None):
     """
     Iterative pruning and Out-of-Fold (OOF) refinement of a single cluster.
     
@@ -51,7 +51,8 @@ def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, 
                 n_folds=n_folds,
                 test_size=experiment_days,
                 plot=False,
-                verbose=False
+                verbose=False,
+                df=df
             )
             cv_row = validation["summary"].iloc[0]
             

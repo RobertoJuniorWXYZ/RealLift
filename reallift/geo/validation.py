@@ -9,9 +9,9 @@ from reallift.config.defaults import DEFAULT_TRAIN_TEST_SPLIT
 from reallift.geo.bootstrap import bootstrap_significance
 
 def validate_geo_clusters(
-    filepath,
-    date_col,
-    splits,
+    filepath=None,
+    date_col=None,
+    splits=None,
     treatment_start_date=None,
     start_date=None,
     end_date=None,
@@ -23,7 +23,8 @@ def validate_geo_clusters(
     output_prefix="geo_validation",
     cluster_idx=None,
     verbose=True,
-    force_equal_weights=False
+    force_equal_weights=False,
+    df=None
 ) -> dict:
     """
     Validate geo groups using train/test split or Time Series Cross-Validation.
@@ -42,19 +43,24 @@ def validate_geo_clusters(
         output_prefix (str): Output prefix for exported CVS.
         cluster_idx (int): Optional cluster ID assigned to the output for traceability.
         verbose (bool): Whether to print logging results.
+        df (pd.DataFrame, optional): Pre-loaded DataFrame. When provided, skips CSV I/O.
 
     Returns:
         dict: Validation result.
     """
-    df = pd.read_csv(filepath)
-
-    df[date_col] = pd.to_datetime(
-        df[date_col],
-        format='mixed',
-        dayfirst=True,
-        errors='coerce'
-    )
-    df = df.dropna(subset=[date_col])
+    if df is not None:
+        df = df.copy()
+    else:
+        if filepath is None:
+            raise ValueError("Either 'filepath' or 'df' must be provided.")
+        df = pd.read_csv(filepath)
+        df[date_col] = pd.to_datetime(
+            df[date_col],
+            format='mixed',
+            dayfirst=True,
+            errors='coerce'
+        )
+        df = df.dropna(subset=[date_col])
 
     # 1. Period Filtering (General Window)
     if start_date is not None:
@@ -68,7 +74,16 @@ def validate_geo_clusters(
     
     # Aggregate by date to handle duplicate entries (e.g., granular user-level or transactional data)
     # This ensures a clean time-series for validation and prevents "zigzag" plots
-    df = df.groupby(date_col).sum(numeric_only=True).reset_index()
+    import warnings
+    with warnings.catch_warnings():
+        try:
+            from pandas.errors import PerformanceWarning
+            warnings.simplefilter("ignore", category=PerformanceWarning)
+        except ImportError:
+            pass
+        df = df.groupby(date_col).sum(numeric_only=True).reset_index()
+        
+    df = df.copy()  # Consolidate memory layout to defragment the DataFrame
     df = df.sort_values(date_col).reset_index(drop=True)
 
     if df.empty:

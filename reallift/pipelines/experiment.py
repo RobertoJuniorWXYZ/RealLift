@@ -9,9 +9,9 @@ from ..geo.placebo import run_placebo_tests, plot_placebo_tests
 from .reporting import print_experiment_summary
 
 def run_geo_experiment(
-    filepath,
-    date_col,
-    treatment_start_date,
+    filepath=None,
+    date_col=None,
+    treatment_start_date=None,
     treatment_end_date=None,
     doe=None,
     scenario=None,
@@ -28,7 +28,8 @@ def run_geo_experiment(
     plot=True,
     verbose=True,
     ignore_treatment_start=False,
-    ignore_treatment_end=False
+    ignore_treatment_end=False,
+    df=None
 ) -> dict:
     """
     Run a complete GeoLift experiment analysis pipeline.
@@ -94,7 +95,8 @@ def run_geo_experiment(
             treatment_start_date=treatment_start_date,
             start_date=start_date,
             end_date=treatment_start_date,
-            verbose=verbose
+            verbose=verbose,
+            df=df
         )
 
     # 2. Results storage
@@ -150,7 +152,8 @@ def run_geo_experiment(
                 n_folds=n_folds,
                 cluster_idx=i,
                 plot=plot,
-                verbose=False # Silent, we print summary later
+                verbose=False, # Silent, we print summary later
+                df=df
             )
 
             duration = estimate_duration(
@@ -163,7 +166,8 @@ def run_geo_experiment(
                 mde=mde,
                 experiment_days=experiment_days,
                 cluster_idx=i,
-                verbose=False # Silent
+                verbose=False, # Silent
+                df=df
             )
 
         # 4. Run Analysis (Actual results)
@@ -183,7 +187,8 @@ def run_geo_experiment(
                 cluster_idx=i,
                 conf_level=conf_level,
                 plot=False,
-                verbose=verbose
+                verbose=verbose,
+                df=df
             )
         else:
             synthetic = run_synthetic_control(
@@ -199,7 +204,8 @@ def run_geo_experiment(
                 cluster_idx=i,
                 conf_level=conf_level,
                 plot=False,
-                verbose=verbose
+                verbose=verbose,
+                df=df
             )
 
         # 5. Placebo tests (Significance)
@@ -218,7 +224,8 @@ def run_geo_experiment(
             cluster_idx=i,
             plot=False,
             verbose=verbose,
-            experiment_type=experiment_type
+            experiment_type=experiment_type,
+            df=df
         )
 
         # 6. Final Plots

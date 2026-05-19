@@ -6,11 +6,11 @@ from scipy import stats
 from ..geo.bootstrap import bootstrap_significance
 
 def run_synthetic_control(
-    filepath,
-    date_col,
-    treatment_geo,
-    control_geos,
-    treatment_start_date,
+    filepath=None,
+    date_col=None,
+    treatment_geo=None,
+    control_geos=None,
+    treatment_start_date=None,
     treatment_end_date=None,
     start_date=None,
     end_date=None,
@@ -18,7 +18,8 @@ def run_synthetic_control(
     cluster_idx=None,
     conf_level=0.95,
     plot=True,
-    verbose=True
+    verbose=True,
+    df=None
 ) -> dict:
     """
     Run synthetic control analysis.
@@ -37,13 +38,19 @@ def run_synthetic_control(
         conf_level (float): Confidence level for bootstrap (default: 0.95).
         plot (bool): Whether to plot the baseline graph.
         verbose (bool): Whether to print verbose logging results.
+        df (pd.DataFrame, optional): Pre-loaded DataFrame. When provided, skips CSV I/O.
 
     Returns:
         dict: Synthetic control result.
     """
-    df = pd.read_csv(filepath)
-    df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
-    df = df.dropna(subset=[date_col])
+    if df is not None:
+        df = df.copy()
+    else:
+        if filepath is None:
+            raise ValueError("Either 'filepath' or 'df' must be provided.")
+        df = pd.read_csv(filepath)
+        df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
+        df = df.dropna(subset=[date_col])
 
     # Period Filtering (Global Window)
     if start_date is not None:

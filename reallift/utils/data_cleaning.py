@@ -7,7 +7,7 @@ from reallift.utils.reporting import generate_cleaning_report
 def clean_geo_data(
     data, 
     date_col: str, 
-    imputation_method: str = 'interpolation', 
+    imputation_method: str = 'constant', 
     constant_value: float = 1e-3, 
     verbose: bool = True,
     plot: bool = False,
@@ -91,14 +91,26 @@ def clean_geo_data(
         raise TypeError("'data' must be a filepath (str) to a CSV or a pandas DataFrame.")
     
     # ── 1. Date Formatting & Sorting ──
-    try:
-        # infer_datetime_format is deprecated in pandas 2.0+, relying on flexible to_datetime
-        # Convert to string first to prevent integers like 20240101 being parsed as nanoseconds
-        df[date_col] = pd.to_datetime(df[date_col].astype(str), format='mixed', errors='coerce' if hasattr(pd, 'to_datetime') else None)
-    except Exception:
-        df[date_col] = pd.to_datetime(df[date_col].astype(str))
+    if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        try:
+            # infer_datetime_format is deprecated in pandas 2.0+, relying on flexible to_datetime
+            # Convert to string first to prevent integers like 20240101 being parsed as nanoseconds
+            df[date_col] = pd.to_datetime(df[date_col].astype(str), format='mixed', dayfirst=True, errors='coerce' if hasattr(pd, 'to_datetime') else None)
+        except Exception:
+            df[date_col] = pd.to_datetime(df[date_col].astype(str), dayfirst=True)
         
-    df = df.groupby(date_col).sum(numeric_only=True).reset_index()
+    # Suppress PerformanceWarning when DataFrame is highly fragmented during groupby aggregation
+    # (commonly occurs when dataset has hundreds/thousands of columns/geos)
+    with warnings.catch_warnings():
+        try:
+            from pandas.errors import PerformanceWarning
+            warnings.simplefilter("ignore", category=PerformanceWarning)
+        except ImportError:
+            pass
+        df = df.groupby(date_col).sum(numeric_only=True).reset_index()
+        
+    # Consolidate memory layout to defragment the DataFrame
+    df = df.copy()
     df = df.sort_values(by=date_col).reset_index(drop=True)
 
     # ── 1.5 Period Filter ──
@@ -344,6 +356,7 @@ def clean_geo_data(
     # ── 6. Visual Verification (Before vs After) ──
     if plot:
         from matplotlib.ticker import FuncFormatter
+        import matplotlib.cm as cm
 
         def human_format(num, pos):
             magnitude = 0
@@ -356,28 +369,43 @@ def clean_geo_data(
         top_vols = df[geo_cols].sum().sort_values(ascending=False)
         cols_to_plot = top_vols.head(20).index.tolist()
         
-        fig, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-        
-        # Plot Before (Raw)
-        df_raw_plot = df_raw.sort_values(by=date_col)
-        for c in cols_to_plot:
-            axes[0].plot(df_raw_plot[date_col], df_raw_plot[c], alpha=0.7, label=c)
-        axes[0].set_title(f"Before Imputation (Top {len(cols_to_plot)} Geos)")
-        axes[0].grid(True, linestyle='--', alpha=0.6)
-        axes[0].yaxis.set_major_formatter(FuncFormatter(human_format))
-        axes[0].legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small', ncol=1)
-        
-        # Plot After (Imputed)
-        df_plot = df.sort_values(by=date_col)
-        for c in cols_to_plot:
-            axes[1].plot(df_plot[date_col], df_plot[c], alpha=0.7, label=c)
-        axes[1].set_title(f"After Imputation: '{imputation_method}'")
-        axes[1].grid(True, linestyle='--', alpha=0.6)
-        axes[1].yaxis.set_major_formatter(FuncFormatter(human_format))
-        axes[1].legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small', ncol=1)
-        
-        plt.tight_layout()
-        plt.show()
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
+            fig.patch.set_facecolor("black")
+            
+            # Get 20 distinct colors
+            try:
+                colors = plt.cm.tab20.colors
+            except AttributeError:
+                colors = cm.rainbow(np.linspace(0, 1, len(cols_to_plot)))
+            
+            for ax in axes:
+                ax.set_facecolor("black")
+                ax.grid(True, linestyle='--', alpha=0.15, color="white")
+                ax.tick_params(colors="#CBD5E1", labelsize=10)
+                ax.yaxis.set_major_formatter(FuncFormatter(human_format))
+                for spine in ax.spines.values():
+                    spine.set_color("#1E1E1E")
+            
+            # Plot Before (Raw)
+            df_raw_plot = df_raw.sort_values(by=date_col)
+            for i, c in enumerate(cols_to_plot):
+                color = colors[i % len(colors)]
+                axes[0].plot(df_raw_plot[date_col], df_raw_plot[c], color=color, alpha=0.8, linewidth=1.5, label=c)
+            axes[0].set_title(f"Before Imputation (Top {len(cols_to_plot)} Geos)", color="white", fontweight="bold", fontsize=12)
+            axes[0].legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small', ncol=1, facecolor="#111111", edgecolor="#333333", labelcolor="white")
+            
+            # Plot After (Imputed)
+            df_plot = df.sort_values(by=date_col)
+            for i, c in enumerate(cols_to_plot):
+                color = colors[i % len(colors)]
+                axes[1].plot(df_plot[date_col], df_plot[c], color=color, alpha=0.8, linewidth=1.5, label=c)
+            axes[1].set_title(f"After Imputation: '{imputation_method}'", color="white", fontweight="bold", fontsize=12)
+            axes[1].legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small', ncol=1, facecolor="#111111", edgecolor="#333333", labelcolor="white")
+            
+            fig.suptitle("Data Cleaning Verification", color="white", fontsize=16, fontweight="bold")
+            plt.tight_layout(rect=[0, 0, 0.88, 0.96])
+            plt.show()
         
     if save_pdf:
         if verbose:
@@ -416,5 +444,5 @@ def clean_geo_data(
         if verbose:
             print(f"  [EXPORT] Cleaned data successfully exported to '{file_name}'.\n")
         
-    return df
+    return df.copy()
 

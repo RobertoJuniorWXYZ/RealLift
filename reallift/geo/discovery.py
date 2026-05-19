@@ -7,8 +7,8 @@ from sklearn.linear_model import ElasticNet
 from reallift.utils.preprocessing import log_diff_transform, scale_data
 
 def discover_geo_clusters(
-    filepath,
-    date_col,
+    filepath=None,
+    date_col=None,
     geos=None,
     n_treatment=3,
     fixed_treatment=None,
@@ -20,7 +20,8 @@ def discover_geo_clusters(
     l1_ratio=0.5,
     n_jobs=None,
     verbose=True,
-    show_results=True
+    show_results=True,
+    df=None
 ) -> list:
     """
     Find the best geo split and build clusters for treatment and control groups.
@@ -43,20 +44,35 @@ def discover_geo_clusters(
         l1_ratio (float or list): ElasticNet L1/L2 mixing ratio.
             Single value (default: 0.5) or list for grid search (e.g. [0.2, 0.5, 0.8]).
         verbose (bool): Whether to print running logs.
+        df (pd.DataFrame, optional): Pre-loaded DataFrame. When provided, skips CSV I/O.
 
     Returns:
         list: List of dictionaries containing the best cluster splits.
     """
-    df = pd.read_csv(filepath)
-    df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
-    df = df.dropna(subset=[date_col])
+    if df is not None:
+        df = df.copy()
+    else:
+        if filepath is None:
+            raise ValueError("Either 'filepath' or 'df' must be provided.")
+        df = pd.read_csv(filepath)
+        df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
+        df = df.dropna(subset=[date_col])
 
     if start_date is not None:
         df = df[df[date_col] >= pd.to_datetime(start_date)]
     if end_date is not None:
         df = df[df[date_col] <= pd.to_datetime(end_date)]
     
-    df = df.groupby(date_col).sum(numeric_only=True).reset_index()
+    import warnings
+    with warnings.catch_warnings():
+        try:
+            from pandas.errors import PerformanceWarning
+            warnings.simplefilter("ignore", category=PerformanceWarning)
+        except ImportError:
+            pass
+        df = df.groupby(date_col).sum(numeric_only=True).reset_index()
+        
+    df = df.copy()  # Consolidate memory layout to defragment the DataFrame
     df = df.sort_values(date_col).reset_index(drop=True)
 
     if geos is None:

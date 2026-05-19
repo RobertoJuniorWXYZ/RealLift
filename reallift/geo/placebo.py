@@ -4,12 +4,12 @@ import matplotlib.pyplot as plt
 from .synthetic import run_synthetic_control
 
 def run_placebo_tests(
-    filepath,
-    date_col,
-    control_geos,
-    treatment_start_date,
-    observed_pre_mspe,
-    observed_post_mspe,
+    filepath=None,
+    date_col=None,
+    control_geos=None,
+    treatment_start_date=None,
+    observed_pre_mspe=None,
+    observed_post_mspe=None,
     observed_lift=None,
     treatment_end_date=None,
     start_date=None,
@@ -19,7 +19,8 @@ def run_placebo_tests(
     cluster_idx=None,
     plot=True,
     verbose=True,
-    experiment_type="synthetic_control"
+    experiment_type="synthetic_control",
+    df=None
 ) -> dict:
     """
     Run placebo tests comparing the MSPE Ratio (Post/Pre) of the observed
@@ -52,7 +53,8 @@ def run_placebo_tests(
                     end_date=end_date,
                     random_state=random_state,
                     plot=False,
-                    verbose=False
+                    verbose=False,
+                    df=df
                 )
             else:
                 result = run_synthetic_control(
@@ -66,7 +68,8 @@ def run_placebo_tests(
                     end_date=end_date,
                     random_state=random_state,
                     plot=False,
-                    verbose=False
+                    verbose=False,
+                    df=df
                 )
             # Use MSPE Ratio: Post-MSPE / Pre-MSPE
             p_ratio = result["post_mspe"] / result["pre_mspe"] if result["pre_mspe"] > 0 else 0

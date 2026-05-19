@@ -12,55 +12,60 @@ import cvxpy as cp
 
 def _check_ghost_lift_oos(clusters, df_pre, date_col, experiment_days):
     """
-    Out-of-Sample Backtest for Ghost Lift detection.
-    
-    Splits the pre-treatment period into Train ([:-d]) and Test ([-d:]) datasets to simulate
-    an active experiment period of size `d`. Uses a strictly convex, level-normalized Synthetic 
-    Control optimization to prevent bias offset extrapolation.
-    
-    Supports single cluster or a list of clusters for Multivariate/Consolidated Ghost Lift checking.
-    When a list of clusters is provided, it predicts the combined synthetic baseline and compares
-    it against the combined observed series, mitigating aggregation-induced bias.
-    
-    Returns True if a Ghost Lift is detected (i.e., Moving Block Bootstrap confidence interval
-    does not cross zero) for any of the requested experiment_days horizons.
+    Out-of-Sample Backtest for Ghost Lift detection via Weekly-Aligned Bootstrap.
+
+    Splits the pre-treatment period into Train ([:-d]) and Test ([-d:]).
+    Trains a strictly convex, level-normalized Synthetic Control on Train,
+    predicts on Test, then segments the effect series into complete calendar
+    weeks (Monday→Sunday).
+
+    A single i.i.d. bootstrap is run over the K weekly mean effects.
+    Weekly aggregation naturally removes within-week autocorrelation,
+    making i.i.d. resampling valid.  If the 95 % CI of the aggregate lift
+    does NOT cross zero, a Ghost Lift is detected.
+
+    Supports single cluster or list of clusters (consolidated check).
+
+    Returns True if a Ghost Lift is detected for any requested horizon.
     """
+    _N_BOOT = 2000
+
     if not isinstance(clusters, list):
         clusters = [clusters]
-        
+
     if not isinstance(experiment_days, (list, tuple)):
         eval_sizes = [int(experiment_days)]
     else:
         eval_sizes = sorted(int(d) for d in experiment_days)
-        
+
     for d in eval_sizes:
-        if d >= len(df_pre) - 5: # Need enough training data
+        if d >= len(df_pre) - 5:  # Need enough training data
             continue
-            
+
         train_df = df_pre.iloc[:-d]
         test_df = df_pre.iloc[-d:]
-        
+
         y_test_total = np.zeros(d)
         y_pred_total = np.zeros(d)
-        
+
         for cluster in clusters:
             treat_cols = cluster["treatment"]
             controls = cluster["control"]
-            
+
             if len(controls) == 0:
                 continue
-                
+
             y_train = train_df[treat_cols].mean(axis=1).values.astype(float)
             X_train = train_df[controls].values.astype(float)
-            
+
             # Train
             y_mean_train = y_train.mean() if y_train.mean() != 0 else 1e-10
             X_mean_train = X_train.mean(axis=0)
             X_mean_train[X_mean_train == 0] = 1e-10
-            
+
             y_norm_train = y_train / y_mean_train
             X_norm_train = X_train / X_mean_train
-            
+
             w_syn = cp.Variable(X_norm_train.shape[1])
             obj_syn = cp.Minimize(cp.sum_squares(y_norm_train - (X_norm_train @ w_syn)))
             cons_syn = [w_syn >= 0, cp.sum(w_syn) == 1]
@@ -74,30 +79,76 @@ def _check_ghost_lift_oos(clusters, df_pre, date_col, experiment_days):
                     w_vals = w_vals / sum_w
             except Exception:
                 w_vals = np.ones(X_norm_train.shape[1]) / X_norm_train.shape[1]
-            
+
             # Test
             y_test = test_df[treat_cols].mean(axis=1).values.astype(float)
             X_test = test_df[controls].values.astype(float)
-            
+
             X_norm_test = X_test / X_mean_train
             y_pred = (X_norm_test @ w_vals) * y_mean_train
-            
+
             y_test_total += y_test
             y_pred_total += y_pred
-            
-        # Only run bootstrap if there's non-zero predictions
-        if np.sum(y_pred_total) > 0:
-            effect = y_test_total - y_pred_total
+
+        # ── Weekly-Aligned Bootstrap ──────────────────────────────────────
+        if np.sum(y_pred_total) <= 0:
+            continue
+
+        effect = y_test_total - y_pred_total
+        test_dates = pd.to_datetime(test_df[date_col].values)
+
+        # Group by ISO calendar week (Monday-anchored)
+        iso_cal = test_dates.isocalendar()
+        week_ids = [f"{y}-W{w:02d}" for y, w in zip(iso_cal.year, iso_cal.week)]
+
+        # Aggregate effect and baseline per week
+        week_effects = {}
+        week_baselines = {}
+        for i, wid in enumerate(week_ids):
+            week_effects.setdefault(wid, []).append(effect[i])
+            week_baselines.setdefault(wid, []).append(y_pred_total[i])
+
+        # Keep only complete weeks (exactly 7 days)
+        weekly_mean_effects = []
+        weekly_mean_baselines = []
+        for wid in week_effects:
+            if len(week_effects[wid]) == 7:
+                weekly_mean_effects.append(np.mean(week_effects[wid]))
+                weekly_mean_baselines.append(np.mean(week_baselines[wid]))
+
+        if len(weekly_mean_effects) < 2:
+            # Not enough complete weeks — fall back to MBB on full series
             boot = bootstrap_significance(effect, y_pred_total, random_state=42)
-            
             if boot["ci_lower_total_pct"] > 0 or boot["ci_upper_total_pct"] < 0:
-                return True # Ghost Lift detected
-            
-    return False # Passed all horizons
+                return True
+            continue
+
+        weekly_mean_effects = np.array(weekly_mean_effects)
+        weekly_mean_baselines = np.array(weekly_mean_baselines)
+        n_weeks = len(weekly_mean_effects)
+
+        # i.i.d. bootstrap over weekly means (autocorrelation already
+        # removed by the weekly aggregation, so blocks are unnecessary)
+        rng = np.random.default_rng(42)
+        boot_pcts = np.empty(_N_BOOT)
+
+        for b in range(_N_BOOT):
+            idx = rng.choice(n_weeks, size=n_weeks, replace=True)
+            sum_eff = weekly_mean_effects[idx].sum()
+            sum_base = weekly_mean_baselines[idx].sum()
+            boot_pcts[b] = sum_eff / sum_base if abs(sum_base) > 1e-10 else 0.0
+
+        ci_lower = np.percentile(boot_pcts, 2.5)
+        ci_upper = np.percentile(boot_pcts, 97.5)
+
+        if ci_lower > 0 or ci_upper < 0:
+            return True  # Ghost Lift detected
+
+    return False  # Passed all horizons
 
 def design_of_experiments(
-    filepath,
-    date_col,
+    filepath=None,
+    date_col=None,
     start_date=None,
     end_date=None,
     geos=None,
@@ -114,7 +165,8 @@ def design_of_experiments(
     verbose=True,
     save_pdf=False,
     pdf_name='doe_report.pdf',
-    logo=None
+    logo=None,
+    df=None
 ) -> dict:
     """
     Design of Experiments (DoE) — Scenario analysis for GeoLift experiments.
@@ -134,15 +186,21 @@ def design_of_experiments(
             on both individual candidates and the consolidated group. Any candidate 
             that induces an additive bias across the synthetic portfolio is rejected.
             Default is True.
+        df (pd.DataFrame, optional): Pre-loaded DataFrame. When provided, skips CSV I/O.
     """
     valid_types = ["synthetic_control", "matched_did"]
     if experiment_type not in valid_types:
         raise ValueError(f"Invalid experiment_type '{experiment_type}'. Allowed types are 'synthetic_control' and 'matched_did'.")
 
     # 1. Detect available geos
-    df = pd.read_csv(filepath)
-    df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
-    df = df.dropna(subset=[date_col])
+    if df is not None:
+        df = df.copy()
+    else:
+        if filepath is None:
+            raise ValueError("Either 'filepath' or 'df' must be provided.")
+        df = pd.read_csv(filepath)
+        df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
+        df = df.dropna(subset=[date_col])
 
     # Filter by dates
     if start_date is not None:
@@ -205,14 +263,21 @@ def design_of_experiments(
     if not has_fixed and search_mode == "ranking":
         from reallift.geo.discovery import _evaluate_combinations
         
-        df_rank = pd.read_csv(filepath)
-        df_rank[date_col] = pd.to_datetime(df_rank[date_col], format='mixed', dayfirst=True, errors='coerce')
-        df_rank = df_rank.dropna(subset=[date_col])
+        df_rank = df.copy()
         if start_date:
             df_rank = df_rank[df_rank[date_col] >= pd.to_datetime(start_date)]
         if end_date:
             df_rank = df_rank[df_rank[date_col] <= pd.to_datetime(end_date)]
-        df_rank = df_rank.groupby(date_col).sum(numeric_only=True).reset_index()
+            
+        with warnings.catch_warnings():
+            try:
+                from pandas.errors import PerformanceWarning
+                warnings.simplefilter("ignore", category=PerformanceWarning)
+            except ImportError:
+                pass
+            df_rank = df_rank.groupby(date_col).sum(numeric_only=True).reset_index()
+            
+        df_rank = df_rank.copy()  # Consolidate memory layout to defragment the DataFrame
         df_rank = df_rank.sort_values(date_col).reset_index(drop=True)
         
         if verbose: print("\n  Evaluating full historical data for global ranking...")
@@ -265,7 +330,8 @@ def design_of_experiments(
                     search_mode=search_mode,
                     verbose=True,
                     show_results=False,
-                    n_jobs=n_jobs
+                    n_jobs=n_jobs,
+                    df=df
                 )
                 search_mode_used = "exhaustive"
                 if verbose:
@@ -300,14 +366,14 @@ def design_of_experiments(
                             filepath=filepath, date_col=date_col, geos=geos,
                             fixed_treatment=[candidate], start_date=start_date, end_date=end_date,
                             use_elasticnet=use_elasticnet,
-                            verbose=False, show_results=False
+                            verbose=False, show_results=False, df=df
                         )
                         current_cluster = candidate_eval[0].copy()
                     except Exception:
                         continue
                     
                     best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
-                        current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type
+                        current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type, df=df
                     )
                     
                     ghost_lift = False
@@ -425,7 +491,7 @@ def design_of_experiments(
                                 filepath=filepath, date_col=date_col, geos=available_geos,
                                 fixed_treatment=[candidate], start_date=start_date, end_date=end_date,
                                 use_elasticnet=use_elasticnet,
-                                verbose=False, show_results=False
+                                verbose=False, show_results=False, df=df
                             )
                             current_cluster = candidate_eval[0].copy()
                         except Exception:
@@ -433,7 +499,7 @@ def design_of_experiments(
                             continue
                         
                         best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
-                            current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type
+                            current_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type, df=df
                         )
                         
                         ghost_lift = False
@@ -626,7 +692,7 @@ def design_of_experiments(
                     filepath=filepath, date_col=date_col, geos=geos,
                     fixed_treatment=try_geos, start_date=start_date, end_date=end_date,
                     use_elasticnet=use_elasticnet,
-                    verbose=False, n_jobs=n_jobs
+                    verbose=False, n_jobs=n_jobs, df=df
                 )
                 
                 raw_items = []
@@ -639,7 +705,7 @@ def design_of_experiments(
                     eval_cluster = cluster.copy()
                     
                     best_cluster, best_cv_row, passed, iters = _run_oof_refinement_single(
-                        eval_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type
+                        eval_cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=experiment_days, experiment_type=experiment_type, df=df
                     )
                     
                     ghost_lift = False
@@ -722,7 +788,8 @@ def design_of_experiments(
             experiment_days=experiment_days,
             start_date=start_date,
             end_date=end_date,
-            verbose=False
+            verbose=False,
+            df=df
         )
 
         # 4d. Compact verbose per scenario

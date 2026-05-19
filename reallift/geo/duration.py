@@ -5,8 +5,8 @@ from sklearn.linear_model import LinearRegression
 from ..config.defaults import DEFAULT_POWER, DEFAULT_ALPHA_TEST, DEFAULT_EXPERIMENT_DAYS, DEFAULT_MDE
 
 def estimate_duration(
-    filepath,
-    date_col,
+    filepath=None,
+    date_col=None,
     treatment_geo=None,
     control_geos=None,
     control_weights=None,
@@ -20,7 +20,8 @@ def estimate_duration(
     cluster_idx=None,
     consolidated=False,
     cluster_residuals=None,
-    verbose=True
+    verbose=True,
+    df=None
 ) -> dict:
     """
     Estimate the duration needed for a GeoLift experiment.
@@ -56,6 +57,7 @@ def estimate_duration(
             regression residuals (via cluster_residuals) or treatment-only variance.
         cluster_residuals (list of Series): Residual time series from per-cluster regressions.
         verbose (bool): Whether to print logging results.
+        df (pd.DataFrame, optional): Pre-loaded DataFrame. When provided, skips CSV I/O.
 
     Returns:
         dict: Duration estimation result.
@@ -82,7 +84,8 @@ def estimate_duration(
                 start_date=start_date,
                 end_date=end_date,
                 cluster_idx=i,
-                verbose=verbose
+                verbose=verbose,
+                df=df
             )
             cluster_results.append(res)
             if res.get("residuals") is not None:
@@ -102,7 +105,8 @@ def estimate_duration(
             end_date=end_date,
             consolidated=True,
             cluster_residuals=all_residuals if all_residuals else None,
-            verbose=verbose
+            verbose=verbose,
+            df=df
         )
 
         return {
@@ -115,9 +119,14 @@ def estimate_duration(
     # ═══════════════════════════════════════════════════════════════════════
     if treatment_geo is None:
         raise ValueError("Either 'clusters' or 'treatment_geo' must be provided.")
-    df = pd.read_csv(filepath)
-    df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
-    df = df.dropna(subset=[date_col])
+    if df is not None:
+        df = df.copy()
+    else:
+        if filepath is None:
+            raise ValueError("Either 'filepath' or 'df' must be provided.")
+        df = pd.read_csv(filepath)
+        df[date_col] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce')
+        df = df.dropna(subset=[date_col])
     
     if start_date is not None:
         df = df[df[date_col] >= pd.to_datetime(start_date)]

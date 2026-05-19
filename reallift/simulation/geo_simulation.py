@@ -278,8 +278,8 @@ def _estimate_series_params(t, y, n_components=3):
 
 
 def generate_simulated_intervention(
-    filepath,
-    treatment_geos,
+    filepath=None,
+    treatment_geos=None,
     days=None,
     start_date=None,
     end_date=None,
@@ -295,7 +295,8 @@ def generate_simulated_intervention(
     save_csv=False,
     file_name="simulated_intervention.csv",
     as_integer=False,
-    verbose=False
+    verbose=False,
+    df=None
 ) -> pd.DataFrame:
     """
     Generate a simulated post-intervention period by extending an existing CSV dataset.
@@ -324,14 +325,24 @@ def generate_simulated_intervention(
         save_csv (bool): Whether to save the full result to a CSV file.
         file_name (str): File name for the saved CSV.
         as_integer (bool): If True, rounds results to the nearest integer.
+        df (pd.DataFrame, optional): Pre-loaded DataFrame. When provided, skips CSV I/O.
 
     Returns:
         pd.DataFrame: Combined DataFrame (Pre-test + Post-test simulation).
     """
     # 1. Load Pre-Test Data
-    df_pre = pd.read_csv(filepath)
-    df_pre[date_col] = pd.to_datetime(df_pre[date_col], format='mixed', dayfirst=True, errors='coerce')
-    df_pre = df_pre.dropna(subset=[date_col])
+    if df is not None:
+        df_pre = df.copy()
+        # Ensure dates are datetime
+        if not pd.api.types.is_datetime64_any_dtype(df_pre[date_col]):
+            df_pre[date_col] = pd.to_datetime(df_pre[date_col], format='mixed', dayfirst=True, errors='coerce')
+            df_pre = df_pre.dropna(subset=[date_col])
+    else:
+        if filepath is None:
+            raise ValueError("Either 'filepath' or 'df' must be provided.")
+        df_pre = pd.read_csv(filepath)
+        df_pre[date_col] = pd.to_datetime(df_pre[date_col], format='mixed', dayfirst=True, errors='coerce')
+        df_pre = df_pre.dropna(subset=[date_col])
     df_pre = df_pre.sort_values(date_col).reset_index(drop=True)
 
     n_pre = len(df_pre)
