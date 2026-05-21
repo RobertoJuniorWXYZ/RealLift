@@ -4,7 +4,8 @@
   <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/logo.png" width="200" style="border-radius: 10px;" alt="RealLift Logo">
 </p>
 
-[![DOI](https://zenodo.org/badge/1193878576.svg)](https://doi.org/10.5281/zenodo.20328611)
+<a href="https://doi.org/10.5281/zenodo.20329451"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20329451.svg" alt="DOI"></a>
+
 
 **Causal Inference Framework for Geo Experiments & Marketing Science**
 
