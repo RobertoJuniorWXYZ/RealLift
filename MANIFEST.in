@@ -1,4 +1,4 @@
 include LICENSE
-recursive-include examples/geotests *.ipynb *.csv
-recursive-exclude examples/geotests/PoCs *
+recursive-include examples/GeoExperiment *.ipynb *.csv
+recursive-exclude examples/TESTING *
 
