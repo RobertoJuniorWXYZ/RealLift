@@ -154,8 +154,8 @@ If you use RealLift in your research or applied work, please cite:
   author    = {Junior, Roberto},
   title     = {RealLift: Robust Design and Inference for Geo-Experimentation},
   year      = {2026},
-  doi       = {10.5281/zenodo.20328611},
-  url       = {https://doi.org/10.5281/zenodo.20328611},
+  doi       = {10.5281/zenodo.20329451},
+  url       = {https://doi.org/10.5281/zenodo.20329451},
   note      = {Preprint}
 }
 ```
