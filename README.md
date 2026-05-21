@@ -1,7 +1,7 @@
 # RealLift
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/logo.png" width="200" style="border-radius: 10px;" alt="RealLift Logo">
+  <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/assets/logo.png" width="200" style="border-radius: 10px;" alt="RealLift Logo">
 </p>
 
 <a href="https://doi.org/10.5281/zenodo.20329451"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20329451.svg" alt="DOI"></a>
