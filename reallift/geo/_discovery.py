@@ -412,7 +412,7 @@ def _print_results(clusters, is_fixed):
         print("SEARCH ENGINE COMPLETED")
         print(f"Top {min(len(clusters), 5)} experiment design recommendations (ranked by lowest numerical risk):")
         print("Tip: Recommendation 0 is statistically your most precise choice for simulation.")
-        print("     It minimizes the 'Synthetic Error Ratio (SER)' (Std Residual / Correlation), balancing low error with high synchronization.")
+        print("     It minimizes the 'Synchronization Error Ratio (SER)' (Std Residual / Correlation), balancing low error with high synchronization.")
         print("-"*60)
         label_prefix = "RECOMMENDATION"
     else:

@@ -1,0 +1,559 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{fancyhdr}
+\setlist[itemize]{leftmargin=*}
+\setlist[enumerate]{leftmargin=*}
+\title{RealLift: Robust Design and Inference for Geo-Experimentation}
+\author{Roberto Junior}
+\date{April 2026}
+
+\fancypagestyle{firstpageinfo}{%
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancyfoot[C]{\footnotesize Independent Researcher and Data Scientist, Rio de Janeiro - RJ, Brazil.\\\href{mailto:robertojuniorifrj@gmail.com}{robertojuniorifrj@gmail.com}}
+}
+
+\begin{document}
+\maketitle
+\thispagestyle{firstpageinfo}
+
+\begin{abstract}
+Measuring the incremental impact of marketing interventions on channels that do not permit individual-level tracking - such as television, outdoor media, radio, and brand campaigns - remains a difficult applied causal inference problem. Geographic experiments provide a practical design, but high-frequency commercial panels differ from the long policy panels for which many synthetic control workflows were originally developed: they are short, seasonal, noisy, heterogeneous in scale, and often require multiple treated markets to reach operationally meaningful exposure. This paper introduces \textbf{RealLift}, an end-to-end framework for design, validation, and inference in geographic incrementality experiments. Rather than treating synthetic control as a standalone estimator, RealLift treats geo experimentation as a sequential decision problem: propose treatment geos, screen donor pools before final convex weighting, reject unstable candidate designs through temporal backtesting, and carry the validated design into cluster-level and consolidated post-treatment inference. The framework targets four recurring design failures: (1) behaviorally inert controls that fit levels but fail to co-move with the treated unit, (2) overfitting under short pre-treatment windows, (3) aggregation bias across multiple treated clusters, and (4) variance underestimation from temporally naive resampling. RealLift contributes a synchronization-aware ranking criterion, the \textbf{Synchronization Error Ratio (SER)}; a greedy treatment-selection procedure with donor-pool isolation and out-of-fold pruning; an out-of-sample \textbf{Ghost Lift} diagnostic for individual and consolidated designs; an inference layer that reuses validated designs for placebo and bootstrap-based post-treatment analysis; and a regression-based power analysis that estimates MDE curves from synthetic-control residual variance rather than raw outcome variance. We formalize the pipeline, state its causal assumptions under the Rubin Causal Model, and separate the contribution into evidence-backed layers. The SER ranking layer is benchmarked on an anonymized retail panel, and an implementation-level diagnostic on the same panel shows that convex SCM with progressive OOF pruning can outperform a ridge-augmented ASCM-like proxy in out-of-fold fit while using fewer donor geographies. The broader outer validation shell is positioned more narrowly: as a rigor-motivated design-accept/reject framework for handling OOF instability, donor overlap, and Ghost Lift risk, rather than as a claim of universal empirical dominance across all geo-experimental settings.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Causal Inference, Synthetic Control, Geo Experiments, Marketing Science, Marketing Mix Models, Experimental Design, Bootstrap Inference
+
+\medskip
+\noindent\textbf{Software and artifact availability.} RealLift is available as the Python package \texttt{reallift} (v0.7.0 at the time of writing). Source code and documentation are available on \href{https://github.com/RobertoJuniorWXYZ/RealLift}{GitHub}, and the package is distributed through \href{https://pypi.org/project/reallift/}{PyPI}. The manuscript should be read both as a methodological description of the framework and as documentation for a publicly accessible implementation that can be inspected and independently benchmarked.
+
+\section{Introduction}
+The measurement of marketing incrementality - quantifying the causal effect of an advertising intervention on business outcomes such as conversions, traffic, or revenue - is a central problem in Marketing Science. While digital channels increasingly offer individual-level attribution through deterministic tracking, a significant portion of media investment flows through channels where such granularity is fundamentally unavailable. Television, outdoor advertising, radio, and brand-level social media campaigns affect aggregate regional outcomes without generating user-level interaction logs. For these channels, \textbf{geographic experimentation} provides one of the most rigorous practical frameworks for causal measurement: a subset of geographic units receives the intervention (treatment), while the remaining units serve as controls, and the causal effect is estimated by comparing observed outcomes against a counterfactual baseline.
+
+The Synthetic Control Method (SCM), introduced by Abadie and Gardeazabal \cite{ref1} and formalized by Abadie, Diamond, and Hainmueller \cite{ref2,ref3}, is a widely used approach for constructing such counterfactuals. By expressing the control as a convex combination of donor units - with non-negative weights summing to one - SCM produces an interpretable baseline that avoids some extrapolation risks inherent in unconstrained regression.
+
+Existing applied workflows tend to emphasize either post-treatment inference or pre-treatment planning under a fixed counterfactual engine. RealLift is positioned differently: it treats geographic experimentation as an end-to-end design, validation, and inference problem in which the main practical risk is not merely poor fit, but accepting a design that is brittle under temporal backtesting, donor reuse constraints, or consolidated portfolio evaluation.
+
+However, the direct application of classical SCM to marketing data introduces four systematic failure modes that, to our knowledge, are rarely treated jointly within a single applied workflow:
+
+\begin{enumerate}
+\item \textbf{Behavioral Desynchronization (Zombie Controls).} Standard SCM minimizes the Root Mean Squared Prediction Error (RMSPE) over the pre-treatment period. In high-volatility markets, this objective can select donor units with low historical variance - units whose series are nearly flat - simply because they do not increase the residual. These "Zombie Controls" may produce good in-sample fit while failing to co-move with the treatment unit's response to market shocks.
+\item \textbf{Overfitting Under Constrained Histories.} Marketing experiments frequently operate with pre-treatment windows of 60-120 days, far shorter than the multi-year panels typical in policy evaluation. Rigid train/holdout splits can leave insufficient data for either phase, while the absence of systematic cross-validation allows the optimizer to memorize noise in the training window.
+\item \textbf{Aggregation Bias Under Multi-Geo Deployment.} Classical SCM was developed primarily for settings with a single treated aggregate unit. In marketing applications, however, practitioners often evaluate multiple treated geographies simultaneously and then aggregate their estimated gaps. In that operational setting, small unit-level counterfactual biases can accumulate, so a portfolio of individually acceptable controls may still exhibit a statistically significant phantom lift when consolidated.
+\item \textbf{Variance Underestimation from Naive Daily Resampling.} Classical bootstrap methods assume independent, identically distributed observations. Marketing time series exhibit strong weekly autocorrelation (day-of-week effects, promotional cycles), and resampling individual days as if they were independent destroys this dependence structure, producing artificially narrow confidence intervals and inflated false positive rates.
+\end{enumerate}
+
+These failure modes suggest that, in practice, a recurrent breakdown of synthetic control in marketing is not simply estimation error but validation failure: candidate designs may look acceptable under in-sample fit yet fail under temporally structured out-of-sample scrutiny or portfolio aggregation.
+
+A separate but practically important design pressure is \emph{donor economy}. In commercial geo experiments, untreated geographies are not free statistical objects: they may still need to support concurrent budget allocation, revenue generation, or other KPI management outside the experiment. A counterfactual that depends on a very large donor set therefore imposes an operational opportunity cost even when fit is acceptable. For this reason, RealLift treats donor economy as a first-class property of the inner counterfactual engine, not merely as an aesthetic by-product of regularization.
+
+\textbf{Contributions.} This paper presents the RealLift framework as an end-to-end approach to design, validation, and inference for these failure modes. Our specific contributions are:
+
+\begin{itemize}
+\item A search-ranking criterion, the \textbf{Synchronization Error Ratio (SER)}, that balances residual minimization with directional correlation, down-ranks behaviorally desynchronized donor combinations, and reallocates finite OOF validation budget toward better synchronized candidates (Section 4.2).
+\item A stationarity-aware ranking specification that computes SER from convex synthetic-control residuals in log-differenced space, then returns to levels for final SCM fitting (Sections 4.1--4.3).
+\item An iterative \textbf{Greedy Lock Search} algorithm that progressively consolidates treatment candidates through sequential Out-of-Fold (OOF) validation, donor pool isolation, and convex re-optimization (Section 4.4).
+\item \textbf{Iterative OOF Pruning}, a cross-validated donor reduction procedure that identifies the optimal model complexity by progressively removing the least influential donors and selecting the configuration that maximizes out-of-fold predictive accuracy without overfitting (Section 4.5).
+\item \textbf{Consolidated Out-of-Sample Ghost Lift Detection}, a multivariate backtesting mechanism that rejects control portfolios exhibiting aggregation-induced phantom effects, using ISO-week aggregation and bootstrap inference over weekly residual means (Section 4.6).
+\item A \textbf{regression-based power analysis} that reports scenario-specific Minimum Detectable Effect curves across candidate experiment durations and treatment shares --- or, conversely, required duration for a target MDE --- using residual variance from the validated synthetic-control regression rather than raw outcome variance (Section 4.7).
+\item An \textbf{end-to-end inference stage} that carries validated pre-experiment designs into cluster-level and consolidated post-treatment analysis using placebo-style diagnostics and bootstrap confidence intervals (Section 4.9).
+\item An \textbf{empirical SER benchmark} on an anonymized retail panel showing that SER preserves the top of the ranking, improves middle-tier OOF performance relative to RMSPE and MSE, and produces positive cumulative OOF lift across the practical search frontier (Section 5.1--5.4).
+\item An \textbf{implementation-level benchmark of the base counterfactual engine} showing that convex SCM with progressive OOF pruning can improve OOF fit and donor economy --- equivalently, materially sparser donor usage --- relative to a ridge-augmented ASCM-like proxy, while also clarifying that Ghost Lift control is not a property of the inner engine alone and must be enforced by the outer validation shell (Section 5.5).
+\end{itemize}
+
+For clarity, the contribution has two nested layers. The \emph{inner layer} is the base counterfactual engine: convex SCM in levels with progressive OOF pruning. The \emph{outer layer} is the design-validation shell: SER ranking, Greedy Lock Search, Ghost Lift rejection, donor-pool isolation, power analysis, and post-treatment inference. The inner layer is judged by out-of-fold fit and donor economy, because in marketing a donor set is not only a statistical ingredient but also a scarce operational resource. The outer layer is judged by whether it admits only designs that remain credible under temporal backtesting and consolidated placebo-style checks.
+
+Throughout the paper, numerical defaults such as admissibility thresholds and bootstrap repetitions are presented as operational defaults calibrated for short commercial panels rather than as universal constants. Where these choices matter substantively, they should be re-tuned and reported explicitly for the application at hand.
+
+The remainder of this paper is organized as follows. Section 2 reviews related work. Section 3 formalizes the problem. Section 4 presents the methodology. Section 5 presents the currently disclosed empirical evidence. Section 6 clarifies validation scope, claim boundaries, and limitations. Section 7 concludes with future directions.
+
+\section{Related Work}
+\subsection{Synthetic Control Methods}
+The Synthetic Control Method was introduced by Abadie and Gardeazabal \cite{ref1} for estimating the economic impact of terrorism in the Basque Country and later formalized as a general framework by Abadie, Diamond, and Hainmueller \cite{ref2}. The method constructs a counterfactual for a single treated unit as a weighted average of untreated donor units, with weights constrained to be non-negative and sum to unity. Abadie et al. \cite{ref3} extended the methodology with placebo-based inference built around the post-to-pre Mean Squared Prediction Error (MSPE) ratio, comparing the treated unit's ratio to the distribution obtained by iteratively reassigning treatment to donor units.
+
+Doudchenko and Imbens \cite{ref7} relaxed the original constraints, allowing negative weights and intercept terms to improve fit in settings where the convex hull of donors does not span the treated unit's trajectory.
+
+Ben-Michael, Feller, and Rothstein \cite{ref16} proposed the Augmented Synthetic Control Method (ASCM), which extends SCM to settings where excellent pre-treatment fit is infeasible. ASCM augments the original SCM estimator with an outcome model---in their main specification, ridge regression---to correct bias from imperfect pre-treatment fit, and it can be written as a modified synthetic-control problem that allows negative donor weights.
+
+\subsection{Geographic Experiments in Marketing}
+The application of causal inference to geographic marketing experiments has been advanced by several industry frameworks. Vaver and Koehler \cite{ref14} formalized the geo experiment design problem at Google, introducing power analysis for geographic randomization. The GeoLift package \cite{ref12} provides an open-source implementation of SCM for marketing lift measurement. Brodersen et al. \cite{ref6} introduced CausalImpact, a Bayesian structural time-series approach that constructs counterfactuals using a state-space model with spike-and-slab priors for automatic variable selection. These systems emphasize different stages of the workflow. CausalImpact is primarily an inference engine once the treated series, donor series, and intervention window have been specified. GeoLift moves further upstream by incorporating market selection and power analysis for geo experiments. The present manuscript is closest in scope to the latter setting, but differs in emphasis: RealLift concentrates convex control construction and complexity control before final design acceptance, then subjects candidate designs to temporal out-of-fold validation, donor-pool isolation, and consolidated Ghost Lift rejection before final inference.
+
+\subsection{Bootstrap Methods for Dependent Data}
+The inadequacy of naive i.i.d. bootstrap on daily time-series observations was addressed by dependent-data resampling methods such as the Moving Block Bootstrap of Künsch \cite{ref10} and Liu and Singh \cite{ref11}. In commercial panels with strong weekly periodicity, an equivalent operational strategy is to aggregate daily residuals to complete week-level units before resampling. Weekly aggregation preserves the recurring intra-week composition inside each unit and permits stable i.i.d. bootstrap over week means, which is especially useful when holdout windows are short.
+
+\subsection{Time Series Cross-Validation}
+Bergmeir and Benítez \cite{ref5} demonstrated that standard $k$-fold cross-validation can be adapted for time series by respecting temporal ordering. The Time Series Split approach - where each fold uses an expanding training window with a fixed-size test window positioned at the end - provides unbiased estimates of out-of-sample performance without future information leakage. Hyndman and Athanasopoulos \cite{ref8} formalized this as the standard validation protocol for forecasting models.
+
+\section{Problem Formulation}
+Consider a panel of $N$ geographic units observed over $T$ pre-treatment periods. Let $Y_{it}$ denote the outcome (e.g., daily conversions) for unit $i$ at time $t$. The experimental design problem consists of two stages:
+
+\textbf{Stage A (Design).} Select a subset $\mathcal{T} \subset \{ 1, \ldots, N \}$ of $K = |\mathcal{T}|$ units for treatment, and for each treated unit $i \in \mathcal{T}$, construct a synthetic control $\hat{Y}_{it}^{(0)}$ from the remaining donor pool $\mathcal{D}_i \subseteq \{ 1, \ldots, N \} \setminus \mathcal{T}$, such that the design is:
+
+\begin{itemize}
+\item \textbf{Predictively accurate}: the synthetic control closely tracks the treated unit's pre-treatment trajectory.
+\item \textbf{Robust to overfitting}: predictive accuracy is stable across temporal cross-validation folds.
+\item \textbf{Free of aggregation bias}: the consolidated portfolio of all synthetic controls does not exhibit phantom effects in backtesting.
+\item \textbf{Sensitivity-qualified}: for each candidate duration and treatment-share scenario, the design reports the minimum detectable effect under the chosen statistical criteria.
+\item \textbf{Operationally economical}: the design preserves enough untreated geographies for concurrent commercial actions rather than consuming most of the geo universe as measurement-only donors.
+\end{itemize}
+
+\textbf{Stage B (Inference).} After the intervention period of $D$ days, estimate the causal effect as:
+
+\[
+\hat{\tau}_i = \frac{1}{D} \sum_{t=T+1}^{T+D} \left( Y_{it} - \hat{Y}_{it}^{(0)} \right)
+\]
+and evaluate causal credibility using both bootstrap-based confidence intervals and placebo-style MSPE-ratio diagnostics, both at the cluster level and after consolidating all treated clusters. In the operational decision rule, a lift is labeled causal only when the bootstrap interval excludes zero and the placebo test yields $p \leq 0.10$.
+
+To align the framework with the Rubin Causal Model, let $Y_{it}(0)$ and $Y_{it}(1)$ denote the potential outcomes for geography $i$ at time $t > T$ under no intervention and intervention, respectively, and let $W_i \in \{0,1\}$ indicate whether geography $i$ is assigned to treatment for the post-treatment window. The observed post-treatment outcome is
+
+\[
+Y_{it}^{\mathrm{obs}} = W_i Y_{it}(1) + (1 - W_i) Y_{it}(0), \qquad t \in \{T+1, \ldots, T+D\}.
+\]
+
+The cluster-level estimand targeted by RealLift is
+
+\[
+\tau_i = \frac{1}{D} \sum_{t=T+1}^{T+D} \left( Y_{it}(1) - Y_{it}(0) \right),
+\]
+
+and the consolidated estimand over the locked treatment set $\mathcal{T}$ is
+
+\[
+\tau^{\mathrm{cons}} = \frac{1}{D} \sum_{t=T+1}^{T+D} \left( \sum_{i \in \mathcal{T}} Y_{it}(1) - \sum_{i \in \mathcal{T}} Y_{it}(0) \right).
+\]
+
+RealLift does not claim that algorithmic screening alone identifies the missing counterfactual path $Y_{it}(0)$. Rather, identification is argued conditionally: if interference is limited, no intervention-timed untreated shock differentially affects the treated geographies, and pre-treatment tracking remains informative about the untreated post-treatment trajectory, then a validated synthetic control can serve as an approximation to $Y_{it}(0)$. The OOF and Ghost Lift layers are therefore presented as empirical stress tests of these conditions, not as proofs that they hold.
+
+Although Stage A is the main source of methodological novelty, RealLift is intended as an end-to-end pipeline in which the validated design is carried forward into Stage B inference.
+
+\section{Methodology}
+The proposed framework operates as a sequential pipeline of interconnected stages, each addressing a specific failure mode identified in Section 1. We present each stage with its formal specification and connect it to the corresponding threat it mitigates.
+
+It is useful to separate the pipeline into an \emph{inner estimation problem} and an \emph{outer design-validation problem}. The inner problem asks how to build a sparse and accurate convex synthetic control once a candidate unit and an eligible donor universe have been specified. The outer problem asks whether a candidate treatment set should be accepted at all once OOF generalization, donor contamination constraints, and Ghost Lift diagnostics are imposed. RealLift is intended as the composition of both layers: the base engine builds and prunes convex controls, while the outer shell decides design admissibility.
+
+\subsection{Stationarity Transform and Modeling Spaces}
+RealLift assumes that the geographic panel entering the core estimator is already suitable for analysis. The methodological core of Section 4.1 is therefore not a data-cleaning routine, but the separation between the \emph{ranking space} and the \emph{final fitting space}: SER is evaluated on log-differenced residual behavior from provisional convex controls, whereas final SCM weighting is performed in levels.
+
+Let $Y_{it}^{\mathrm{clean}}$ denote the level series entering the inner engine. In the common case, this is simply the observed level series. If a dataset contains zeros, sparse gaps, or extreme scale pathologies, optional utility-level cleaning may be applied upstream to obtain $Y_{it}^{\mathrm{clean}}$, but that step is not part of the core identification logic. The transform that defines the screening space is
+
+\[
+Z_{it} = \Delta \log Y_{it}^{\mathrm{clean}} = \log Y_{it}^{\mathrm{clean}} - \log Y_{i,t-1}^{\mathrm{clean}}.
+\]
+
+This transform has two desirable properties: (1) it removes multiplicative trends, and (2) it renders the resulting series interpretable as approximate growth rates, making units with different absolute volumes comparable.
+
+Operationally, the inner-engine order is explicit: (i) start from the analysis-ready level series $Y_{it}^{\mathrm{clean}}$, (ii) compute the stationary series $Z_{it} = \Delta \log Y_{it}^{\mathrm{clean}}$, (iii) fit provisional convex controls on the eligible donor universe and compute SER from log-differenced residual dispersion and synchronization, and (iv) return to levels for final convex SCM weighting and OOF pruning.
+
+For the global SER ranking stage (Section 4.2), residual dispersion and synchronization are evaluated in the log-differenced space $Z_{it}$. For the convex optimization stage (Section 4.3), we return to the cleaned level series $Y_{it}^{\mathrm{clean}}$, so the final synthetic control remains an interpretable convex combination of observed geographic levels.
+
+\begin{quote}
+\textbf{Implementation note.} Because $\log(0)$ is undefined, any optional gap repair must occur before forming $Z_{it} = \Delta \log Y_{it}^{\mathrm{clean}}$. RealLift ships utility code for that purpose when a panel is not analysis-ready, but the core estimator begins once $Y_{it}^{\mathrm{clean}}$ has been defined.
+\end{quote}
+
+
+\subsection{Sequential SER Ranking from Convex Controls}
+
+For each candidate geography $i$, RealLift computes a provisional SER score using the donor universe that is eligible \emph{at the current greedy step}. The initial global ranking is the special case with no locked treatments, but the ranking is not fixed once at the start of the search. Whenever a geography is locked into treatment, it is removed from the donor universe of all remaining candidates, provisional convex controls are re-estimated, and SER scores are recomputed.
+
+Let $\mathcal{L}^{(m-1)}$ denote the set of treatment geographies already locked after $m-1$ greedy steps. At step $m$, any remaining candidate $i \notin \mathcal{L}^{(m-1)}$ may only use donors from
+
+\[
+\mathcal{D}_i^{(m)} = \{1, \ldots, N\} \setminus \left( \mathcal{L}^{(m-1)} \cup \{i\} \right).
+\]
+
+This restriction enforces the core design rule: a geography selected for treatment cannot appear inside any donor pool. Donor pools may still overlap across clusters; the exclusivity constraint applies to treatment assignments, not to donors.
+
+\textbf{Provisional convex control.} For candidate $i$ at step $m$, RealLift fits a convex synthetic control directly on the currently eligible donor set:
+
+\[
+\hat{w}_i^{(m)} = \arg\min_{w} \left\| Y_i^{\mathrm{clean}} - X_{\mathcal{D}_i^{(m)}}^{\mathrm{clean}} w \right\|^2
+\quad \text{subject to} \quad w \geq 0, \quad \mathbf{1}^\top w = 1.
+\]
+
+The provisional level-space control is $\hat{Y}_{i,t}^{(0,m)} = X_{\mathcal{D}_i^{(m)},t}^{\mathrm{clean}} \hat{w}_i^{(m)}$. It is then transformed to $Z_{i,\mathrm{synth},t}^{(m)} = \Delta \log \hat{Y}_{i,t}^{(0,m)}$, and the ranking residual is
+
+\[
+\hat{e}_{i,t}^{(m)} = Z_{i,t} - Z_{i,\mathrm{synth},t}^{(m)}.
+\]
+
+The canonical ranking stage is deliberately direct: it does not introduce a separate Elastic Net purification step before SER. In commercial panels whose donor universe has already passed data-quality filtering, the additional sparse-regression screen can add instability in short pre-treatment windows without improving the ordering of candidate geographies. SER is therefore computed from the residuals and synchronization of the convex control itself.
+
+\textbf{SER-based candidate scoring.} Let
+
+\[
+\rho_i^{(m)} = \rho\!\left(Z_i, Z_{i,\mathrm{synth}}^{(m)}\right),
+\qquad
+\rho_{i,+}^{(m)} = \max\left\{\rho_i^{(m)}, 0\right\}.
+\]
+
+The \textbf{Synchronization Error Ratio (SER)} is
+
+\[
+\mathrm{SER}_i^{(m)} =
+\frac{\sigma\!\left(\hat{e}_{i,t}^{(m)}\right)}{\rho_{i,+}^{(m)} + \epsilon}.
+\]
+
+Here $\sigma(\hat{e}_{i,t}^{(m)})$ is the standard deviation of the log-differenced prediction residuals, $\rho(\cdot, \cdot)$ is the Pearson correlation between the candidate series and its provisional synthetic counterpart, and $\epsilon > 0$ is a small stability constant. The stabilized denominator avoids a special case for non-positive correlations: candidates with zero or negative synchronization receive a denominator close to $\epsilon$, producing a very large SER and effectively removing them from the practical search frontier.
+
+\textbf{Operational role.} SER penalizes two related failure modes. A low residual standard deviation captures numerical proximity, while a high correlation captures directional synchronization. By placing positive correlation in the denominator, SER assigns worse scores to combinations that achieve low residual variance through flatness rather than co-movement. A donor pool with $\mathrm{SER} = 0.5$ (low residuals, high correlation) is preferred over one with $\mathrm{SER} = 5.0$ (low residuals, near-zero correlation). Viewed operationally, SER is not a terminal forecasting loss; it is a finite-budget ranking surrogate for greedy search. The initial global ranking, obtained when $\mathcal{L}^{(0)} = \emptyset$, provides the starting frontier. After each accepted treatment geography is added to the locked set, eligible donor sets and provisional convex controls are updated before selecting the next candidate. This sequential re-estimation ensures that each accepted cluster is evaluated under the same treatment-exclusion rule that must hold in the final design.
+\subsection{Convex Optimization in Levels}
+Given the currently eligible donor pool $\mathcal{D}_i$ for a candidate geography, final synthetic-control weights are estimated by solving a constrained quadratic program in level space.
+
+\textbf{Optimization Problem.}
+
+\[
+\min_{w} \left\| Y_i^{\mathrm{clean}} - X_{\mathcal{D}_i}^{\mathrm{clean}} \, w \right\|^2 \quad \text{subject to} \quad w \geq 0, \quad \mathbf{1}^\top w = 1
+\]
+
+The non-negativity and sum-to-one constraints ensure that the synthetic control remains a proper convex combination - interpretable as a weighted average of observed donor geographies. Weights below a threshold ($w_j < 0.001$) are pruned, the remaining weights are renormalized, and the active donor set is denoted $\mathcal{D}_i^*$.
+
+The final synthetic prediction in level space is therefore
+
+\[
+\hat{Y}_{it}^{(0)} = X_{\mathcal{D}_i^*,t}^{\mathrm{clean}} \cdot w^*.
+\]
+
+This separation of roles is deliberate: optional cleaning utilities may appear upstream only when the raw panel requires them, log-differences are used for SER ranking, and the final SCM weights are estimated on levels to preserve counterfactual interpretability.
+
+\subsection{Greedy Lock Search with Progressive Consolidation}
+The selection of $K$ treatment units from $N$ candidates is a combinatorial problem with $\binom{N}{K}$ possible configurations. Exhaustive evaluation becomes infeasible for large $N$. The framework therefore uses a greedy sequential algorithm that progressively locks approved candidates while re-estimating the remaining search frontier after every lock. Viewed formally, the procedure is a greedy approximation to a constrained combinatorial optimization problem over treatment assignments, where feasibility is jointly defined by the exclusion rule $\mathcal{D}_i \subseteq \{1, \ldots, N\} \setminus \mathcal{T}$, out-of-fold performance, and Ghost Lift rejection. The design constraint is asymmetric: treatment assignments must be mutually exclusive with donor membership, but donor pools themselves may overlap across clusters.
+
+\textbf{Algorithm 1: Greedy Lock Search}
+
+\textbf{Input:} Panel $\{ Y_{it} \}_{i=1}^{N}$, target treatment count $K$, experiment horizons $\mathcal{H}$
+
+\textbf{Output:} Validated cluster set $\{(\mathcal{T}_k, \mathcal{D}_k^*, w_k^*)\}_{k=1}^{\ell}$ with $\ell \leq K$
+
+\begin{enumerate}
+\item \textbf{Initial Global Ranking.} Set $\mathcal{L} \leftarrow \emptyset$. Evaluate each unit $i$ individually using the SER criterion from Section 4.2 with donor set $\mathcal{D}_i^{(1)} = \{1, \ldots, N\} \setminus \{i\}$. Sort all $N$ units by ascending SER to obtain an initial priority queue $\mathcal{R}$.
+
+\item \textbf{Sequential Re-Ranking.} Repeat until $|\mathcal{L}| = K$ or no admissible candidate remains:
+
+\textbf{(a)} For every remaining candidate $i \notin \mathcal{L}$, update the eligible donor pool to
+\[
+\mathcal{D}_i(\mathcal{L}) = \{1, \ldots, N\} \setminus (\mathcal{L} \cup \{i\}),
+\]
+re-fit the provisional convex control (Section 4.2), and recompute the provisional SER score. Resort the remaining candidates by ascending SER.
+
+\textbf{(b)} Take the top-ranked remaining candidate $c$ and estimate its synthetic control using convex optimization (Section 4.3) followed by iterative OOF pruning (Section 4.5). If $c$ fails the strict validation rules, discard it from the queue and continue.
+
+\textbf{(c)} Form the trial treatment set $\mathcal{L}' = \mathcal{L} \cup \{c\}$. Re-estimate every cluster in $\mathcal{L}'$ under donor sets that exclude all units in $\mathcal{L}'$, i.e., for each $k \in \mathcal{L}'$ use donors from $\{1, \ldots, N\} \setminus (\mathcal{L}' \cup \{k\})$. Then apply individual and consolidated Ghost Lift detection (Section 4.6) to the trial design. If the trial design fails either diagnostic, reject $c$ and continue.
+
+\textbf{(d)} If the trial design passes, lock the candidate by setting $\mathcal{L} \leftarrow \mathcal{L}'$.
+
+\item \textbf{Quality Score.} Compute the harmonic mean of out-of-fold $R^2$ values across the locked clusters as the overall design quality metric.
+\end{enumerate}
+
+\textbf{Donor Pool Isolation.} The algorithm maintains the invariant that no locked treatment geography appears inside any donor pool. Operationally, when the locked treatment set is $\mathcal{L}$, every cluster is estimated on donors drawn from $\{1, \ldots, N\} \setminus \mathcal{L}$. Donor pools may overlap across clusters, but treatment geographies are always excluded from donor eligibility. This does not guarantee full statistical independence between clusters, but it does preserve design separability and avoids mechanically coupled treatment-control assignments across the consolidated portfolio.
+
+\textbf{Fallback.} If the search is exhausted before $K$ slots are filled, the framework returns the validated subset already locked, making the feasibility shortfall explicit rather than silently relaxing the treatment-exclusion constraint.
+
+
+\subsection{Iterative Out-of-Fold Pruning}
+After the initial convex fit, the active donor set may still contain marginal units whose inclusion introduces noise without improving predictive accuracy. The framework addresses this through progressive removal with retrospective selection. The search path is one-directional by design: it visits a nested sequence of donor sets from more complex to simpler, and the approval rule selects the best admissible point along that path.
+
+\textbf{Procedure.} Starting from the active donor pool $\mathcal{D}_i^*$ with weights $w^*$:
+
+\begin{enumerate}
+\item Evaluate the current cluster via $k$-fold Time Series Cross-Validation (expanding window, fixed test size). Record the average out-of-fold $R^2_{\mathrm{test}}$, $R^2_{\mathrm{train}}$, MAPE, and WAPE.
+\item Remove the donor with the smallest influence, operationalized by the smallest active weight after convex fitting.
+\item Re-solve the convex optimization (Section 4.3) on the reduced pool to obtain new weights and re-evaluate the OOF statistics.
+\item Continue progressive removal until only one active donor remains or the minimum admissible donor count is reached.
+\end{enumerate}
+
+This produces a sequence of nested models $\{ M_p \}_{p=1}^{|\mathcal{D}_i^*|}$, each with progressively fewer donors. The framework selects the optimal model $M^*$ as the one satisfying the following strict validation rules:
+
+\textbf{Approval Criteria.}
+
+\begin{itemize}
+\item $R^2_{\mathrm{test}} \geq 0.60$
+\item $R^2_{\mathrm{train}} \geq 0.60$
+\item $|R^2_{\mathrm{train}} - R^2_{\mathrm{test}}| \leq 0.20$
+\end{itemize}
+
+Among all configurations satisfying these criteria, the framework selects the one with the highest $R^2_{\mathrm{test}}$, breaking ties in favor of the smaller train-test gap and then the smaller donor set. This is the operational "Goldilocks Point": enough complexity to generalize, but not enough to memorize the training window. If no configuration satisfies the criteria, the candidate is marked as failed, and the best available configuration (by $R^2_{\mathrm{test}}$) is retained only as a diagnostic fallback rather than as an approved design.
+
+\textbf{Rationale.} The minimum $R^2$ threshold of 0.60 ensures that the synthetic control explains a substantively meaningful proportion of pre-treatment variance. The gap constraint of 0.20 between train and test $R^2$ guards against overfitting: a model that achieves $R^2_{\mathrm{train}} = 0.95$ but $R^2_{\mathrm{test}} = 0.50$ has memorized training noise and will produce unreliable counterfactuals. The progressive path itself defines the relevant complexity frontier: each visited donor set is recorded, and the retrospective approval rule chooses the best admissible configuration.
+
+These numerical cutoffs are operational defaults calibrated for short commercial panels. They are not claimed to be universal constants; when outcome volatility, seasonal structure, or intervention cadence differs materially, the admissibility thresholds should be re-tuned and reported explicitly.
+
+\subsection{Consolidated Out-of-Sample Ghost Lift Detection}
+The most subtle failure mode in multi-cluster experimental designs is \textbf{aggregation bias} - the phenomenon where individually acceptable synthetic controls produce a systematic phantom effect when their predictions are combined. We refer to this phantom effect as a "Ghost Lift" and introduce a dedicated backtesting mechanism to detect it.
+
+\subsubsection{Individual Ghost Lift Detection}
+For a single cluster with treatment unit $i$ and donors $\mathcal{D}_i^*$:
+
+\begin{enumerate}
+\item \textbf{Temporal Split.} Divide the pre-treatment period into a training segment $[1, T-d]$ and a holdout segment $[T-d+1, T]$, where $d$ is the anticipated experiment duration.
+\item \textbf{Train.} Solve the convex optimization (Section 4.3) using only the training segment of the cleaned level series.
+\item \textbf{Predict.} Generate synthetic predictions for the holdout segment using the weights learned on the training segment.
+\item \textbf{Test.} Compute the holdout residuals $e_t = Y_{it} - \hat{Y}_{it}^{(0)}$ for $t \in [T-d+1, T]$.
+\item \textbf{Bootstrap Inference.} Aggregate the holdout residuals by ISO week and apply i.i.d. bootstrap to the resulting weekly means (Section 4.8). If the resulting confidence interval does not contain zero - i.e., $\mathrm{CI}_{\mathrm{lower}} > 0$ or $\mathrm{CI}_{\mathrm{upper}} < 0$ - a Ghost Lift is detected.
+\end{enumerate}
+
+A Ghost Lift indicates that the synthetic control exhibits a systematic bias that would be misinterpreted as a treatment effect, even in the absence of any actual intervention. In RealLift this is treated as a hard rejection signal, not as a cosmetic diagnostic: strong OOF $R^2$ and sparse donor usage are desirable, but they are insufficient if the holdout residuals still imply a systematic phantom effect.
+
+\subsubsection{Consolidated (Multivariate) Ghost Lift Detection}
+When multiple clusters have been individually approved, the framework performs an additional aggregate test:
+
+\begin{enumerate}
+\item For each locked cluster $k \in \mathcal{L}$, generate holdout predictions $\hat{Y}_{k,t}^{(0)}$ using the same temporal split.
+\item Compute the \textbf{consolidated} holdout residuals: $e_t^{\mathrm{cons}} = \sum_{k \in \mathcal{L}} Y_{kt} - \sum_{k \in \mathcal{L}} \hat{Y}_{kt}^{(0)}$
+\item Aggregate $e_t^{\mathrm{cons}}$ by ISO week and apply i.i.d. bootstrap to the resulting weekly means.
+\item If the consolidated confidence interval does not contain zero, the candidate that triggered the test is rejected - it introduces additive bias into the global control portfolio.
+\end{enumerate}
+
+This mechanism directly addresses Failure Mode 3 (Section 1): even if each individual synthetic control has an acceptably small bias (e.g., +0.5\%), the sum of $K$ such biases can produce a statistically significant phantom effect that would constitute a false positive in the final analysis.
+
+\subsection{Power Analysis with Regression-Based Variance}
+The final stage of the design pipeline estimates the statistical sensitivity of the proposed experiment. In the operational default, the user specifies a grid of candidate experiment durations $d$ (in days) together with one or more treatment-share scenarios, and the framework reports the corresponding Minimum Detectable Effect (MDE) curve at the chosen significance level and target power. In implementation, the target power defaults to 80\%. The converse planning mode is also supported: given a target MDE, the framework reports the required duration.
+
+\textbf{Variance Estimation.} For each validated treatment cluster, RealLift first constructs the pre-treatment synthetic baseline $\hat{Y}_{i,t}^{(0)}$ from the selected donor set. The planning variance is then estimated from the simple log-scale calibration regression
+
+\[
+\Delta \log Y_{i,t} = \alpha_i + \beta_i \Delta \log \hat{Y}_{i,t}^{(0)} + \varepsilon_{i,t},
+\]
+with $\hat{\sigma}_i = \mathrm{sd}(\hat{\varepsilon}_{i,t})$. Unlike the raw standard deviation of the treatment series, $\hat{\sigma}_i$ is not inflated by common movement that the synthetic control already explains. The relevant noise scale for planning is the variance of the counterfactual gap, $\hat{\tau}_{i,t} = Y_{i,t} - \hat{Y}_{i,t}^{(0)}$, not the variance of the raw outcome; the regression residual estimates that null-period gap variation on the log scale.
+
+\textbf{MDE Computation.} For a given scenario and duration $d$, the Minimum Detectable Effect at significance level $\alpha$ and power $1 - \beta$ is:
+
+\[
+\text{MDE}_i(d) = \exp\left( \frac{(z_{1-\alpha/2} + z_{1-\beta}) \cdot \hat{\sigma}_i}{\sqrt{d}} \right) - 1
+\]
+where the exponentiation converts from the log-scale effect to a percentage lift. For the consolidated experiment, $\hat{\sigma}$ is computed from the consolidated residual series, obtained by pooling the validated cluster-level residuals, yielding an experiment-level MDE that reflects cross-cluster variance pooling. Operationally, this produces the planning object used most often in practice: a table of achievable MDEs across candidate durations and treatment-share scenarios, from which planners choose the execution window and treatment scope that best trade off statistical sensitivity against business constraints.
+
+
+\subsection{Bootstrap Inference for Effect Series}
+Significance testing in RealLift is based on resampling the effect series at a temporal unit that matches the dependence structure of the diagnostic. For Ghost Lift detection, the canonical unit is the ISO week rather than the individual day.
+
+\textbf{Weekly Aggregation.} Given a daily effect or residual series $\{ e_t \}_{t=1}^{n}$, let $\mathcal{W}$ denote the set of ISO weeks represented in the holdout window. For each week $w \in \mathcal{W}$, compute
+
+\[
+\bar{e}_w = \frac{1}{|I_w|} \sum_{t \in I_w} e_t,
+\]
+
+where $I_w$ is the set of days in ISO week $w$. The bootstrap sample is drawn i.i.d. with replacement from the weekly means $\{\bar{e}_w : w \in \mathcal{W}\}$. This aggregation absorbs intra-week autocorrelation and day-composition effects before resampling, making the week-level bootstrap more stable in short holdout windows.
+
+\textbf{Resampling Procedure.} Given weekly means $\{\bar{e}_w\}_{w \in \mathcal{W}}$:
+
+\begin{enumerate}
+\item Sample $|\mathcal{W}|$ weekly means with replacement from $\{\bar{e}_w\}_{w \in \mathcal{W}}$.
+\item Compute the bootstrap statistic (mean, sum, or percentage effect) from the resampled weekly series.
+\item Repeat $B$ times (default: $B = 2000$).
+\end{enumerate}
+
+\textbf{Confidence Intervals and p-Values.} The $(1 - \alpha)$ confidence interval is constructed from the empirical quantiles of the bootstrap distribution:
+
+\[
+\mathrm{CI}_{1-\alpha} = \left[ Q_{\alpha/2}(\hat{\theta}^*), \; Q_{1-\alpha/2}(\hat{\theta}^*) \right]
+\]
+The two-sided bootstrap p-value is:
+
+\[
+p = 2 \cdot \min\left( \Pr(\hat{\theta}^* \leq 0), \; \Pr(\hat{\theta}^* \geq 0) \right)
+\]
+
+\subsection{Post-Treatment Cluster and Consolidated Inference}
+Once a design passes Stage A, the locked treatment set and validated donor pools are frozen and carried into the live experiment. After the intervention concludes, inference is conducted both within each treatment cluster and across the consolidated portfolio.
+
+For post-treatment inference, the convex counterfactual fit is extended with a free intercept while preserving the convex donor-weight constraints:
+
+\[
+(a_k^*, w_k^*) = \arg\min_{a,w} \left\| Y_k^{\mathrm{pre}} - a\mathbf{1} - X_{\mathcal{D}_k^*}^{\mathrm{pre}} w \right\|^2
+\quad \text{subject to} \quad w \geq 0, \quad \mathbf{1}^\top w = 1.
+\]
+
+The intercept absorbs residual level differences between the treated geography and the synthetic control without changing the convex interpretation of the donor weights. This distinction is deliberate: during design, SER reflects the full cost of co-movement without an intercept; during inference, the counterfactual is anchored to the observed pre-treatment level so that the estimated effect reflects post-treatment divergence rather than a persistent pre-treatment level offset.
+
+For cluster $k$, let $\hat{Y}_{k,t}^{(0)} = a_k^* + X_{\mathcal{D}_k^*,t} w_k^*$ denote the synthetic counterfactual implied by this calibrated fit and let
+
+\[
+\Delta_{k,t} = Y_{k,t} - \hat{Y}_{k,t}^{(0)}
+\]
+
+be the post-treatment effect series for $t \in \{T+1, \ldots, T+D\}$. Cluster-level summaries include mean lift, total lift, and percentage lift, for example:
+
+\[
+\widehat{\mathrm{Lift}}_k^{\%} = \frac{\sum_{t=T+1}^{T+D} \Delta_{k,t}}{\sum_{t=T+1}^{T+D} \hat{Y}_{k,t}^{(0)}}.
+\]
+
+In addition to bootstrap confidence intervals, the framework reports placebo-style diagnostics based on the post-to-pre Mean Squared Prediction Error (MSPE) ratio in the spirit of Abadie et al. (2015). The treated cluster's observed ratio is compared with the distribution of placebo ratios generated by donor reassignment, and the placebo p-value is the share of placebo ratios greater than or equal to the observed ratio. This provides a second inferential lens: bootstrap intervals quantify uncertainty in the effect series, while placebo tests assess whether the observed post-treatment divergence is extreme relative to synthetic-control noise. In the operational decision rule, a lift is labeled causal only if both checks are passed: the bootstrap interval excludes zero and the placebo MSPE-ratio p-value satisfies $p \leq 0.10$.
+
+For the consolidated experiment, the observed and synthetic series are aggregated over all locked clusters $k \in \mathcal{L}$ to form
+
+\[
+\Delta_t^{\mathrm{cons}} = \sum_{k \in \mathcal{L}} Y_{k,t} - \sum_{k \in \mathcal{L}} \hat{Y}_{k,t}^{(0)}.
+\]
+
+The consolidated lift is then summarized in absolute and percentage terms and evaluated with the same bootstrap machinery. This experiment-level estimand is operationally important when the business decision concerns the pooled impact of a multi-market intervention rather than any single treated geo in isolation.
+
+\section{Empirical Evidence and Validation Roadmap}
+\subsection{Empirical SER Ranking Benchmark}
+We first close the ablation for the SER layer with an empirical benchmark on an anonymized large-scale retail transaction panel. The panel spans 830 uninterrupted daily observations from January 1, 2024 through April 9, 2026. Geographies with more than 5\% zero-sales days were excluded, and the retained top geographies represented 96.83\% of the macro gross-volume footprint. After filtering, the active donor matrix contained 936 eligible control units. The benchmark evaluates 134 target geographies distributed across top-, middle-, and long-tail volume tiers.
+
+The comparison isolates the global ranking rule while holding the downstream validation machinery fixed. Each target geography is transformed into daily log-differences, provisional convex controls are fit on the eligible donor pools, and candidate quality is then ranked by one of three rules: SER, RMSPE, or MSE. For each ranking rule, we run five-fold rolling-origin OOF validation and summarize both test $R^2$ and the train-test overfitting gap. To stabilize the rank curves, cumulative summaries are also reported with a moving-average window of $K = 10$.
+
+This experiment is intentionally not framed as a terminal forecasting contest. The relevant question is whether SER provides a better ordering for finite-budget greedy search when OOF validation is the acceptance gate for candidate treatment clusters.
+
+Figure~\ref{fig:ser-benchmark-panels} collects the corresponding visual diagnostics. The plots are not a substitute for Tables 1 and 2, but they make the rank-wise trade-offs and cumulative frontier behavior visible across the full ordering.
+
+\subsection{Tiered OOF Results}
+Table 1 reports OOF performance by ranking tier. At the very top of the ranking, SER and error-only criteria are effectively tied. The gain appears in the middle tier, where SER improves OOF $R^2$ and slightly reduces the train-test gap. In the long tail, SER underperforms RMSPE/MSE. Averaged over the full ranking, the three criteria are essentially tied. This pattern is exactly the one expected from a useful search heuristic: preserve the top of the frontier, improve the actionable middle, and accept weaker ordering in the tail that a budget-constrained search is unlikely to explore deeply.
+
+\begin{center}
+\small
+\begin{tabular}{llccc}
+\hline
+Tier & Metric & SER & RMSPE & MSE \\
+\hline
+Top & OOF $R^2$ & 0.8627 & 0.8625 & 0.8625 \\
+ & Overfit Gap & 0.0678 & 0.0674 & 0.0674 \\
+Middle & OOF $R^2$ & 0.7850 & 0.7756 & 0.7756 \\
+ & Overfit Gap & 0.0935 & 0.0952 & 0.0952 \\
+Long-Tail & OOF $R^2$ & 0.7277 & 0.7371 & 0.7371 \\
+ & Overfit Gap & 0.1093 & 0.1080 & 0.1080 \\
+Overall & OOF $R^2$ & 0.7918 & 0.7918 & 0.7918 \\
+ & Overfit Gap & 0.0902 & 0.0902 & 0.0902 \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Table 1.} Out-of-fold predictive stability by ranking tier. SER matches RMSPE/MSE at the top of the ranking, improves the middle tier, and sacrifices the long tail.
+
+\subsection{Cumulative Search-Frontier Lift}
+Because Greedy Lock Search consumes candidates from the front of the ranking rather than averaging uniformly over the full ordering, the more relevant operational summary is cumulative OOF quality as the search frontier expands. Relative to RMSPE, SER produces a positive smoothed cumulative OOF lift over most practically relevant portfolio sizes: 0.09\% at $K=20$, 0.22\% at $K=50$, 0.89\% at $K=80$, 0.66\% at $K=100$, and 1.13\% at $K=134$. Pointwise cumulative improvements are noisy in the extreme tail, so the smoothed cumulative lift is the primary diagnostic.
+
+\begin{center}
+\small
+\begin{tabular}{rcc}
+\hline
+Portfolio Size $K$ & Pointwise Lift (\%) & Smoothed Cumulative Lift (\%) \\
+\hline
+20 & 0.0000 & 0.0927 \\
+50 & 0.0808 & 0.2214 \\
+80 & 0.8472 & 0.8895 \\
+100 & 2.8454 & 0.6586 \\
+134 & -12.4527 & 1.1311 \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Table 2.} Selected portfolio-size summaries comparing SER to RMSPE. The pointwise series is noisy in the tail, but the smoothed cumulative lift remains positive across the practical search frontier.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{5ffbf647-b438-44c4-9d1e-3953de08494b.png}\hfill
+\includegraphics[width=0.48\textwidth]{23d77315-e4a7-430f-aa7c-408e5389413c.png}
+
+\medskip
+\includegraphics[width=0.48\textwidth]{9560f4d4-296f-4aa8-82af-0ae5b5754808.png}\hfill
+\includegraphics[width=0.48\textwidth]{1ba48b36-b8dd-4eca-a170-9f38dad17123.png}
+
+\medskip
+\includegraphics[width=0.48\textwidth]{febdeac0-f58b-4278-8136-918f1f76f7cf.png}
+\caption{Visual diagnostics for the empirical SER ranking benchmark. Across the five panels, the plots summarize the rank-wise out-of-fold comparison between SER and classical error-based rankings, the associated overfitting behavior, and the cumulative search-frontier lift that motivates SER as a finite-budget search heuristic.}
+\label{fig:ser-benchmark-panels}
+\end{figure}
+
+\subsection{Interpretation for Finite-Budget Search}
+The empirical pattern is consistent with the role assigned to SER in RealLift. SER is not designed to improve the terminal predictive fit of the final synthetic control. Instead, it serves as a ranking surrogate that reallocates finite OOF validation budget toward candidates with stronger synchronization. In this benchmark, RMSPE and MSE produce nearly identical orderings, while SER preserves the top-ranked candidates and improves the middle of the search frontier --- precisely the region where a greedy procedure is still deciding which candidates deserve expensive downstream validation. For this reason, the relevant success criterion is not the global average over the entire ranking, but the cost-benefit trade-off at the front and middle of the frontier.
+
+\subsection{Base Counterfactual-Engine Benchmark and Full-Framework Screening Results}
+This subsection reports two linked diagnostics on the same anonymized retail panel comprising 45 candidate geographies. The first diagnostic isolates the \emph{inner counterfactual engine}; the second shows what happens when the full RealLift validation shell is allowed to accept or reject candidate designs. The distinction matters. If one looks only at unscreened candidate groups, the reader sees the performance of the estimator under arbitrary assignments. If one then applies SER ranking, progressive OOF pruning, Ghost-Lift rejection, and donor locking, the relevant object is no longer the average random group, but the subset of designs that survives the framework's approval rules.
+
+For the inner-engine benchmark, we repeatedly sampled five candidate treatment geographies at a time over five Monte Carlo iterations, producing 25 geo-level pseudo-treatment cases from the 45 available geographies. Within each case, the comparison is between (i) the inner RealLift engine --- convex SCM in levels followed by progressive OOF pruning --- and (ii) an ASCM-like ridge-augmented proxy that uses SCM-style base weights plus ridge correction. This is a deliberately harsh benchmark because the candidate groups are \emph{not} prescreened by the outer RealLift shell.
+
+Under this unscreened stress test, the inner RealLift engine is associated with better pre-treatment fit and donor economy in this benchmark. Average OOF corr$^2$ rises from 0.7716 to 0.8195, average classical OOF $R^2$ rises from 0.5644 to 0.6947, and the average number of distinct donor geographies used per iteration falls from 40 to 26. The donor-economy gap is even clearer at the geo level: RealLift uses on average 8.2 active donors per pseudo-treated geography, whereas the ASCM-like proxy uses 39.2. In a representative five-geo iteration, RealLift used donor sets of size 8, 6, 10, 9, and 2, while the ASCM-like proxy used 40, 40, 38, 40, and 40 with similar or worse OOF fit. Fold-level Ghost-Lift significance and coverage are similar across the two engines, with a slight edge to RealLift on the fold-level summaries, while geo-level OOF Ghost-Lift significance remains substantial for both. This is not the final RealLift claim; it is the empirical motivation for the outer screening layer. Randomly proposed multi-geo designs are simply not self-validating.
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\hline
+Metric & RealLift Inner Engine & ASCM-like Proxy \\
+\hline
+Avg OOF corr$^2$ (Pearson) & 0.8195 & 0.7716 \\
+Avg OOF $R^2$ (classical) & 0.6947 & 0.5644 \\
+Avg distinct controls / iteration & 26 & 40 \\
+Avg active donors / geo & 8.2 & 39.2 \\
+Fold-level Ghost-Lift significance rate & 61.6\% & 63.2\% \\
+Fold-level coverage (95\% CI) & 38.4\% & 36.8\% \\
+Geo-level OOF Ghost-Lift significance rate & 72.0\% & 48.0\% \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Table 3.} Inner-engine benchmark under unscreened random candidate groups. Convex SCM with progressive OOF pruning improves OOF fit and, crucially, achieves the same task with dramatically smaller donor sets than the ASCM-like proxy. This donor economy is operationally valuable because it preserves untreated geographies for future experimentation and concurrent marketing decisions, even before the outer RealLift screening shell is applied.
+
+The second diagnostic activates the full RealLift workflow on the complete 45-geo candidate pool. Candidates are ranked by the stability proxy, re-estimated under changing donor universes, required to pass the OOF admissibility thresholds, rejected if they exhibit Ghost Lift, and locked once accepted so that they cannot reappear as donors in subsequent groups. In this search, the framework accepted 19 of the 45 candidate geographies, organized into four accepted groups, for a design success rate of 42.2\%.
+
+Among accepted designs, the average OOF corr$^2$ was 0.8718 and the average classical OOF $R^2$ was 0.8086. The observed geo-level Ghost-Lift rate among accepted designs fell to 0\%, and the average number of distinct donor geographies remained operationally large at 30 per iteration. In this benchmark, the outer RealLift shell filters the candidate pool so that the retained designs combine high pre-treatment fidelity with zero observed phantom lift in the retained sample.
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\hline
+Metric & Random RealLift Groups & RealLift Full Accepted Designs \\
+\hline
+Geo cases / accepted geographies & 25 geo-cases & 19 accepted geos \\
+Avg OOF corr$^2$ (Pearson) & 0.8195 & 0.8718 \\
+Avg OOF $R^2$ (classical) & 0.6947 & 0.8086 \\
+Observed geo-level Ghost-Lift rate & 72.0\% & 0.0\% \\
+Avg distinct controls / iteration & 26 & 30 \\
+Design success rate & n/a & 42.2\% \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Table 4.} Effect of the outer RealLift validation shell. Relative to unscreened random candidate groups, the full framework retains only a subset of admissible designs, but the retained subset exhibits stronger OOF fit and zero observed Ghost Lift.
+
+Read jointly, Tables 3 and 4 make the intended point. Progressive pruning makes the convex SCM engine sparser and stronger than the ASCM-like proxy in this benchmark, but it is the outer RealLift shell that turns that estimator into a design system. The correct interpretation is therefore sequential: first improve the counterfactual engine; then refuse to deploy it on groups that fail the Ghost-Lift and stability checks.
+
+\section{Validation Scope and Claim Boundaries}
+The manuscript therefore advances two empirical claims and one broader framework claim. The first empirical claim is that, on the disclosed anonymized retail panel with 134 target geographies and 936 active controls, SER matches classical error rankings at the top of the frontier, improves middle-tier OOF performance, and delivers a positive cumulative OOF lift across most practically relevant portfolio sizes. The second empirical claim is that, on the same panel, the base RealLift counterfactual engine is associated with higher OOF fit and materially fewer donor geographies than a ridge-augmented ASCM-like proxy. The broader framework claim is narrower than a universal performance claim: the outer validation shell is proposed as a disciplined accept/reject protocol grounded in causal and operational diagnostics. The disclosed results motivate that protocol and partially exercise it, but they do not exhaust external validation across all industries, geographies, or outcome processes. The evidence disclosed in this manuscript is retrospective and benchmark-based: it evaluates ranking behavior, counterfactual fit, and design-screening diagnostics on historical panels rather than reporting new live-intervention treatment-effect case studies.
+
+The omission of field case studies reflects data-governance constraints rather than nonuse. RealLift has been applied in proprietary commercial settings, but those results are not reported here because the underlying datasets are confidential. In undisclosed operational applications, the framework has been used in retail settings with more than 5{,}130 geographies, in repeated state-level media and streaming studies spanning Brazil's 27 federative units, and in state-level telecommunications applications. These operational contexts are reported only as background on field use and scale; they are not part of the disclosed validation evidence and should not be read as substitutes for reportable treatment-effect case studies.
+
+The paper is intentionally scoped to these documented empirical layers. Readers interested in alternative validation protocols or additional benchmarks can inspect the open implementation and adapt it independently. In that sense, the manuscript aims for transparent framework specification, reproducible benchmarking, and bounded claims rather than for the suggestion that every layer has already received exhaustive external validation.
+
+\section{Conclusion}
+\subsection{Summary}
+We have presented RealLift, an end-to-end framework for design, validation, and inference in geographic incrementality experiments in Marketing Science. The framework addresses four critical failure modes of classical Synthetic Control Methods when applied to high-frequency commercial data: behavioral desynchronization, overfitting, additive aggregation bias, and variance underestimation.
+
+The key methodological components - the SER ranking loss, Greedy Lock Search with OOF pruning, Consolidated Ghost Lift detection, regression-based power analysis, and cluster-level plus consolidated post-treatment inference - are designed as complementary layers of a single pipeline. The current empirical evidence supports two concrete claims on the disclosed retail panel. First, SER behaves as a better ranking surrogate than RMSPE/MSE for finite-budget OOF validation on that panel. Second, the inner RealLift engine --- convex SCM in levels with progressive OOF pruning --- is a competitive and, in that benchmark, often superior sparse counterfactual builder relative to an ASCM-like ridge-augmented proxy, while also preserving more untreated geographies for concurrent business use. The broader framework claim remains deliberately narrower: raw fit and donor economy do not by themselves license an experiment, so the outer validation shell is proposed as a design-discipline layer that rejects candidate groups exhibiting OOF instability or Ghost Lift. The evidence base disclosed here is retrospective and benchmark-oriented; additional external validation and reportable field-effect case studies remain future work rather than completed evidence claims.
+
+\subsection{Theoretical Boundaries and Operational Mitigations}
+The framework operates under the assumptions of the Rubin Causal Model \cite{ref13,ref9}, which impose fundamental theoretical boundaries:
+
+\begin{enumerate}
+\item \textbf{SUTVA (Stable Unit Treatment Value Assumption).} The model assumes no interference between treated and control units. National media campaigns or geographic mobility between regions can violate this assumption. \textbf{Mitigation:} The data preparation phase should incorporate geographic exclusion zones ("Ring Fences") around treatment regions to create buffer zones that absorb spillover effects.
+\item \textbf{Temporal Ignorability.} Unobserved local shocks occurring exclusively in the treatment period (e.g., regional natural disasters, competitor actions) can distort results. \textbf{Mitigation:} Strict operational governance over external events, combined with the framework's capacity to adjust and recalibrate anomalous temporal windows.
+\item \textbf{Selection-Induced Bias.} Using the historical series both for treatment selection (Greedy Search) and for generalization validation (OOF) introduces a subtle form of adaptive selection bias. \textbf{Mitigation:} The convex constraints prevent unbounded extrapolation, and the consolidated out-of-sample Ghost Lift test provides an additional final validation layer. We deliberately chose not to hold out a blind validation sample to maximize the learning window in data-scarce marketing environments.
+\item \textbf{Generalized Parallel Trends.} The validity of the synthetic counterfactual depends on the assumption that the weighted combination of donors would have continued to track the treatment unit in the absence of intervention. \textbf{Mitigation:} The OOF pruning mechanism and Ghost Lift detection specifically test this assumption under multiple temporal configurations, providing empirical evidence for (or against) parallel trends stability.
+\end{enumerate}
+
+\begin{thebibliography}{99}
+\bibitem{ref1} Abadie, A., \& Gardeazabal, J. (2003). The Economic Costs of Conflict: A Case Study of the Basque Country. \emph{American Economic Review}, 93(1), 113-132.
+\bibitem{ref2} Abadie, A., Diamond, A., \& Hainmueller, J. (2010). Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program. \emph{Journal of the American Statistical Association}, 105(490), 493-505.
+\bibitem{ref3} Abadie, A., Diamond, A., \& Hainmueller, J. (2015). Comparative Politics and the Synthetic Control Method. \emph{American Journal of Political Science}, 59(2), 495-510.
+\bibitem{ref5} Bergmeir, C., \& Benítez, J. M. (2012). On the Use of Cross-Validation for Time Series Predictor Evaluation. \emph{Information Sciences}, 191, 192-213.
+\bibitem{ref6} Brodersen, K. H., Gallusser, F., Koehler, J., Remy, N., \& Scott, S. L. (2015). Inferring Causal Impact Using Bayesian Structural Time-Series Models. \emph{Annals of Applied Statistics}, 9(1), 247-274.
+\bibitem{ref7} Doudchenko, N., \& Imbens, G. W. (2016). Balancing, Regression, Difference-in-Differences and Synthetic Control Methods: A Synthesis. \emph{NBER Working Paper}, No. 22791.
+\bibitem{ref8} Hyndman, R. J., \& Athanasopoulos, G. (2018). \emph{Forecasting: Principles and Practice} (2nd ed.). OTexts: Melbourne, Australia. Accessed April 29, 2026.
+\bibitem{ref9} Imbens, G. W., \& Rubin, D. B. (2015). \emph{Causal Inference for Statistics, Social, and Biomedical Sciences: An Introduction}. Cambridge University Press.
+\bibitem{ref10} Künsch, H. R. (1989). The Jackknife and the Bootstrap for General Stationary Observations. \emph{Annals of Statistics}, 17(3), 1217-1241.
+\bibitem{ref11} Liu, R. Y., \& Singh, K. (1992). Moving Blocks Jackknife and Bootstrap Capture Weak Dependence. In R. LePage \& L. Billard (Eds.), \emph{Exploring the Limits of Bootstrap} (pp. 225-248). Wiley.
+\bibitem{ref12} Meta Open Source. (2022). \emph{GeoLift}: Open-source software and documentation for geo experiments.
+\bibitem{ref13} Rubin, D. B. (1974). Estimating Causal Effects of Treatments in Randomized and Nonrandomized Studies. \emph{Journal of Educational Psychology}, 66(5), 688-701.
+\bibitem{ref14} Vaver, J., \& Koehler, J. (2011). Measuring Ad Effectiveness Using Geo Experiments. Google Inc.
+\bibitem{ref16} Ben-Michael, E., Feller, A., \& Rothstein, J. (2021). The Augmented Synthetic Control Method. \emph{Journal of the American Statistical Association}, 116(536), 1789-1803.
+\end{thebibliography}
+
+\end{document}

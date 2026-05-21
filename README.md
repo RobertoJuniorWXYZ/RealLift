@@ -122,7 +122,7 @@ results.plot_lift_distributions(show_null=True)    # bootstrap CI + hypothesis t
 | Algorithm | Role |
 |---|---|
 | **Convex Intercept** | Absorbs baseline shift between treated and synthetic while preserving Σw = 1 |
-| **Synthetic Error Ratio (SER)** | Pre-experiment geo ranking and volatility scoring |
+| **Synchronization Error Ratio (SER)** | Pre-experiment geo ranking and volatility scoring |
 | **ElasticNet Pool Purification** | Removes weak/spurious controls before convex optimization |
 | **Moving Block Bootstrap (MBB)** | Respects temporal autocorrelation (~7-day blocks) for conservative CIs |
 | **OOS Ghost Lift Detection** | Weekly-aligned backtest that flags spurious effects in the experiment design |

@@ -176,11 +176,6 @@ def estimate_duration(
             sigma = mean_residuals.std()
             method = "residuals"
             n_series = len(cluster_residuals)
-            # Autocorrelation correction on pooled residuals
-            rho1_cons = mean_residuals.autocorr(lag=1)
-            if np.isnan(rho1_cons) or rho1_cons < 0:
-                rho1_cons = 0.0
-            ac_factor_cons = (1 - rho1_cons) / (1 + rho1_cons)
         else:
             # Fallback: variance of the aggregated treatment log-diffs
             if isinstance(treatment_geo, list) and len(treatment_geo) > 1:
@@ -193,10 +188,6 @@ def estimate_duration(
             sigma = treatment_mean_logdiff.std()
             method = "treatment_variance"
             n_series = len(treatment_geo) if isinstance(treatment_geo, list) else 1
-            rho1_cons = treatment_mean_logdiff.autocorr(lag=1)
-            if np.isnan(rho1_cons) or rho1_cons < 0:
-                rho1_cons = 0.0
-            ac_factor_cons = (1 - rho1_cons) / (1 + rho1_cons)
 
         return _compute_and_report(
             mde=mde,
@@ -217,8 +208,6 @@ def estimate_duration(
             extra_stats={
                 "method": method,
                 "n_series": n_series,
-                "rho1": rho1_cons,
-                "ac_factor": ac_factor_cons,
             }
         )
 
@@ -238,50 +227,25 @@ def estimate_duration(
     corr = treatment.corr(control_mean)
     std_residual_simple = (treatment - control_mean).std()
 
-    # Step A: Prepare Features with structure removal (Trend + Weekday)
-    # We use log-diff as the base transform for stationarity
     df_transformed = np.log(pd.concat([treatment, df[control_geos]], axis=1)).diff().dropna()
     y = df_transformed.iloc[:, 0].values
-    X_controls = df_transformed.iloc[:, 1:].values
-    
-    # Add structure: Trend and Day-of-Week dummies
-    n_obs = len(y)
-    dates_transformed = df[date_col].iloc[1:]
-    dow_dummies = pd.get_dummies(dates_transformed.dt.dayofweek, prefix='dow', drop_first=True).values
-    trend = np.arange(n_obs).reshape(-1, 1)
-    
-    X = np.hstack([X_controls, trend, dow_dummies])
+    X = df_transformed.iloc[:, 1:].values
 
-    if control_weights is not None and len(control_weights) == X_controls.shape[1]:
-        # If we have weights, we only use the controls for prediction, 
-        # but residuals should still account for structure.
-        y_pred = X_controls @ np.array(control_weights)
-        std_residual_reg = (y - y_pred).std()
-        r_squared = float(np.corrcoef(y, y_pred)[0, 1])**2 if np.std(y) > 0 and np.std(y_pred) > 0 else 0.0
+    if control_weights is not None and len(control_weights) == X.shape[1]:
+        # Bivariate calibration regression on the synthetic composite:
+        # Δlog Y = α + β·Δlog Ŷ_synthetic + ε  (preprint Section 4.7)
+        y_synthetic = (X @ np.array(control_weights)).reshape(-1, 1)
+        model = LinearRegression().fit(y_synthetic, y)
+        y_pred = model.predict(y_synthetic)
+        r_squared = model.score(y_synthetic, y)
     else:
-        # Standard OLS to find the best possible fit (potential overfit check needed)
-        model = LinearRegression()
-        model.fit(X, y)
+        # Fallback: multivariate OLS on all controls (no SCM weights available)
+        model = LinearRegression().fit(X, y)
         y_pred = model.predict(X)
-        std_residual_reg = (y - y_pred).std()
         r_squared = model.score(X, y)
-    
-    # Safety: Penalize MDE if R2 is too high (avoiding the "too good to be true" trap)
-    if r_squared > 0.95:
-        std_residual_reg *= (1 + (r_squared - 0.95) * 5) # Gradual penalty
 
     residual_reg = y - y_pred
-
-    # Step B: Autocorrelation correction (Effective Sample Size)
-    # Compute lag-1 autocorrelation of residuals.
-    # We use a robust approach: if rho is positive, it reduces n_eff.
-    rho1 = pd.Series(residual_reg).autocorr(lag=1)
-    if np.isnan(rho1) or rho1 < 0:
-        rho1 = 0.0  
-    
-    # n_eff correction factor: captures how much information we ACTUALLY have.
-    # Highly correlated series have much higher variance in means.
-    ac_factor = (1 - rho1) / (1 + rho1)  
+    std_residual_reg = residual_reg.std()
 
     return _compute_and_report(
         mde=mde,
@@ -305,8 +269,6 @@ def estimate_duration(
             "std_residual_regression": std_residual_reg,
             "r_squared": r_squared,
             "correlation": corr,
-            "rho1": rho1,
-            "ac_factor": ac_factor,
         },
         residuals=pd.Series(residual_reg)
     )
@@ -324,15 +286,11 @@ def _compute_and_report(
     Internal: compute MDE curve or power curve and produce output.
     Shared between consolidated and per-cluster modes.
     """
-    # Autocorrelation correction factor: n_eff = n * ac_factor
-    ac_factor = extra_stats.get("ac_factor", 1.0)
-
     # ── AUTO-MDE MODE (mde=None) ─────────────────────────────────────────
     if mde is None:
         mde_curve = []
         for d in days_list:
-            n_eff = max(d * ac_factor, 1)  # effective sample size
-            delta = (z_alpha + z_beta) * sigma / np.sqrt(n_eff)
+            delta = (z_alpha + z_beta) * sigma / np.sqrt(max(d, 1))
             mde_curve.append({
                 "days": d,
                 "mde": np.exp(delta) - 1,
@@ -366,9 +324,8 @@ def _compute_and_report(
     delta_pct = np.exp(delta) - 1
     delta_abs = mean_treat * delta_pct
 
-    def compute_power(effect, std, n, a, ac_f=1.0):
-        n_eff = max(n * ac_f, 1)  # effective sample size
-        se = std / np.sqrt(n_eff)
+    def compute_power(effect, std, n, a):
+        se = std / np.sqrt(max(n, 1))
         z = effect / se
         z_a = norm.ppf(1 - a / 2)
         return norm.cdf(z - z_a)
@@ -377,7 +334,7 @@ def _compute_and_report(
     for d in days_list:
         results.append({
             "days": d,
-            "power": compute_power(delta, sigma, d, alpha, ac_factor),
+            "power": compute_power(delta, sigma, d, alpha),
         })
 
     results_df = pd.DataFrame(results)
@@ -392,7 +349,7 @@ def _compute_and_report(
         best_days = None
         best_power = None
         n_est = ((z_alpha + z_beta) * sigma / delta) ** 2
-        estimated_days = int(np.ceil(n_est / ac_factor)) if ac_factor > 0 else int(np.ceil(n_est))
+        estimated_days = int(np.ceil(n_est))
 
     if verbose:
         _print_header(consolidated, cluster_idx, auto_mde=False)
