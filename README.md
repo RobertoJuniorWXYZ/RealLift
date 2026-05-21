@@ -4,6 +4,8 @@
   <img src="https://raw.githubusercontent.com/RobertoJuniorWXYZ/RealLift/main/logo.png" width="200" style="border-radius: 10px;" alt="RealLift Logo">
 </p>
 
+[![DOI](https://zenodo.org/badge/1193878576.svg)](https://doi.org/10.5281/zenodo.20328611)
+
 **Causal Inference Framework for Geo Experiments & Marketing Science**
 
 **RealLift** is a Python library for measuring the true incremental impact of marketing interventions through Synthetic Control, Convex Optimization, and robust significance testing — designed for markets where individual-level tracking is unavailable.
@@ -139,3 +141,20 @@ results.plot_lift_distributions(show_null=True)    # bootstrap CI + hypothesis t
 ---
 
 Developed by **Roberto Junior**.
+
+---
+
+## Citation
+
+If you use RealLift in your research or applied work, please cite:
+
+```bibtex
+@misc{junior2026reallift,
+  author    = {Junior, Roberto},
+  title     = {RealLift: Robust Design and Inference for Geo-Experimentation},
+  year      = {2026},
+  doi       = {10.5281/zenodo.20328611},
+  url       = {https://doi.org/10.5281/zenodo.20328611},
+  note      = {Preprint}
+}
+```
