@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import warnings
 import matplotlib.pyplot as plt
-from reallift.utils.reporting import generate_cleaning_report
+from reallift.geo._reporting import generate_cleaning_report
 
 def clean_geo_data(
     data, 
@@ -92,12 +92,7 @@ def clean_geo_data(
     
     # ── 1. Date Formatting & Sorting ──
     if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
-        try:
-            # infer_datetime_format is deprecated in pandas 2.0+, relying on flexible to_datetime
-            # Convert to string first to prevent integers like 20240101 being parsed as nanoseconds
-            df[date_col] = pd.to_datetime(df[date_col].astype(str), format='mixed', dayfirst=True, errors='coerce' if hasattr(pd, 'to_datetime') else None)
-        except Exception:
-            df[date_col] = pd.to_datetime(df[date_col].astype(str), dayfirst=True)
+        df[date_col] = pd.to_datetime(df[date_col].astype(str), format="%Y-%m-%d", errors="coerce")
         
     # Suppress PerformanceWarning when DataFrame is highly fragmented during groupby aggregation
     # (commonly occurs when dataset has hundreds/thousands of columns/geos)
@@ -210,8 +205,8 @@ def clean_geo_data(
         
     vol_df = None
     if quantile_bins is not None and len(score_df) >= quantile_bins:
-        # Sort strictly by volume descending to bucket into quantiles
-        vol_df = score_df.sort_values(by="Sum_Original", ascending=False).reset_index(drop=True)
+        # Sort by zero rate ascending (primary), volume descending (tiebreak) to bucket into quantiles
+        vol_df = score_df.sort_values(by=["Zero_Rate", "Sum_Original"], ascending=[True, False]).reset_index(drop=True)
         try:
             # Divide index into equal buckets
             vol_df['Quantile'] = pd.qcut(vol_df.index, q=quantile_bins, labels=[f"Q{i}" for i in range(1, quantile_bins+1)])
@@ -223,7 +218,7 @@ def clean_geo_data(
                 
     if verbose:
         if vol_df is not None:
-            print(f"\n  [QUANTILE ANALYSIS] Segmented by Original Volume ({quantile_bins} bins)")
+            print(f"\n  [QUANTILE ANALYSIS] Segmented by Zero Rate ({quantile_bins} bins, Q1 = cleanest)")
             global_vol = vol_df["Sum_Original"].sum()
             
             q_hdr = f"  {'Quantile':<10} | {'Geos #':<8} | {'Avg % Zeros':<12} | {'Σ Volume':<18} | {'% of Total':<12} | {'Cumulative %':<14} | {'Avg Vol/Geo':<15}"

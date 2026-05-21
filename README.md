@@ -6,18 +6,18 @@
 
 **Causal Inference Framework for Geo Experiments & Marketing Science**
 
-**RealLift** is an advanced Python library engineered to measure the true incremental impact (Lift) of marketing interventions through rigorous Causal Inference, Synthetic Control methodologies, and Robust Significance Testing.
+**RealLift** is a Python library for measuring the true incremental impact of marketing interventions through Synthetic Control, Convex Optimization, and robust significance testing — designed for markets where individual-level tracking is unavailable.
 
 ---
 
 ## Framework Pillars
 
-RealLift is built upon four layers of defense against noise and volatility:
+Four layers of defense against noise and spurious correlations:
 
-1.  **Data Quality (Clean)**: Intelligent missing value imputation and filtering of noisy geographic entities to ensure high-fidelity inputs.
-2.  **Auditable Planning (Design of Experiments)**: Algorithmically identifies the optimal geographic clusters and projects statistical power (MDE) prior to any campaign investment.
-3.  **Causal Inference (Synthetic Control)**: Formulates robust counterfactuals via Convex Optimization with Intercept, ensuring behavioral alignment even across differing baseline levels.
-4.  **Confidence Validation (Placebo & Significance)**: Defends analytical conclusions through Moving Block Bootstrap (MBB) and Permutation tests, providing indisputable visual and statistical evidence.
+1. **Data Quality (`clean`)** — Missing value imputation, zero-rate filtering, and geo-level quality scoring.
+2. **Auditable Planning (`design`)** — Algorithmically selects optimal treatment/control clusters and projects statistical power (MDE) before any spend.
+3. **Causal Inference (`run`)** — Builds counterfactuals via Convex Optimization with Intercept Adjustment, ensuring behavioral alignment across differing baseline levels.
+4. **Confidence Validation** — Moving Block Bootstrap (MBB) + Placebo/Permutation tests with visual and statistical evidence.
 
 ---
 
@@ -29,92 +29,111 @@ pip install reallift
 
 ---
 
-## Quick Start Guide
+## Quick Start
 
-The RealLift 2.0 API is object-oriented. You instantiate a single `RealLift` orchestrator that holds the state of your data in-memory, making execution blazingly fast and extremely simple.
+The API is object-oriented. Instantiate a `GeoExperiment` via the `RealLift` namespace — it holds the data in memory across all pipeline steps.
 
-### 1. Initialize and Clean Data
-Load your Pandas DataFrame and initialize the RealLift orchestrator.
+### 1. Initialize
 
 ```python
-import pandas as pd
 from reallift import RealLift
 
-# Load your raw data
-df = pd.read_csv("geo_daily_sales.csv")
+# Accepts a CSV path or a pandas DataFrame
+rl = RealLift.GeoExperiment(
+    "geo_daily_sales.csv",
+    date_col="date",
+    start_date="2025-01-01",   # optional: window the analysis period
+    end_date="2025-04-30",
+)
+```
 
-# Initialize orchestrator
-rl = RealLift(df, date_col="date")
+### 2. Clean
 
-# Clean, filter, and impute missing data (returns a clean DataFrame and a visual report)
+```python
 df_clean = rl.clean(
-    geos=None, # auto-detects
-    imputation_method="interpolation"
+    imputation_method="constant",   # "constant" or "interpolation"
+    max_zero_rate=0.0,              # drop geos with any zero-revenue days
+    keep_top_quantiles=1,           # keep only top revenue quantile
+    quantile_bins=40,
+    save_pdf=True,
+    pdf_name="DataQualityReport.pdf",
 )
 ```
 
-### 2. Design the Experiment (Pre-Test Phase)
-Use the DoE pipeline to rigorously select the best treatment and control geometries based on historical correlations.
+### 3. Design (Pre-Test Phase)
 
 ```python
-# Run the Design of Experiments
-doe_results = rl.design_of_experiments(
-    start_date="2025-01-01",
-    end_date="2025-03-31",
-    experiment_days=[21, 28, 30],
-    n_folds=5
+doe = rl.design(
+    pct_treatment=[0.05, 0.10, 0.15],   # treatment pool sizes to evaluate
+    experiment_days=[21, 28, 35],        # durations to evaluate
+    check_ghost_lift=True,               # OOS backtest for spurious effects
+    save_pdf=True,
+    pdf_name="DoEReport.pdf",
 )
 
-# Export an executive PDF report
-doe_results.export_report("experiment_design.pdf")
+# Visual diagnostics
+doe.plot_cluster_fits(scenario=0)       # pre-period synthetic control fit per cluster
+doe.plot_consolidated_fit(scenario=0)  # aggregated control group fit
+doe.plot_power_analysis()              # MDE curves vs. experiment duration
 ```
 
-### 3. Evaluate Incremental Impact (Post-Test Phase)
-Measure the precise financial and percentual lift utilizing the Causal Inference engine against the final dataset after the campaign.
+### 4. Run (Post-Test Phase)
+
+**Option A — Backtest on historical data** (validate the design before the campaign):
 
 ```python
-# Assuming 'df_post' now contains the full historical + campaign data
-rl = RealLift(df_post, date_col="date")
+results = rl.run(
+    perform_backtesting={"lift": 0.0, "days": 28},  # placebo: inject 0% lift
+    doe=doe,
+    scenario=0,
+)
+```
 
-# Run the causal inference analysis
-exp_results = rl.run(
+**Option B — Real campaign analysis** (after the campaign ends, load data that includes the treatment period):
+
+```python
+rl_post = RealLift.GeoExperiment("geo_daily_sales_with_campaign.csv", date_col="date")
+rl_post.clean()
+
+results = rl_post.run(
     treatment_start_date="2025-04-01",
-    treatment_end_date="2025-04-21",
-    start_date="2025-01-01",
-    doe=doe_results, 
-    scenario=0
+    treatment_end_date="2025-04-28",
+    doe=doe,
+    scenario=0,
 )
 ```
 
-### 4. Professional Visual Diagnostics
-RealLift ships with a "Black Premium" plotting suite designed for executive presentations.
+### 5. Visualize Results
 
 ```python
-# View Treatment vs Synthetic for each cluster (Test period only)
-exp_results.plot_cluster_effects(post_only=True)
-
-# View aggregated causal impact across all regions
-exp_results.plot_consolidated_effect(post_only=True)
-
-# View the Hypothesis Test (H0 vs H1) using Bootstrap distributions
-exp_results.plot_lift_distributions(show_null=True)
+results.plot_cluster_effects(post_only=False)      # treatment vs. synthetic per cluster
+results.plot_consolidated_effect(post_only=False)  # aggregated causal impact
+results.plot_lift_distributions(show_null=True)    # bootstrap CI + hypothesis test
 ```
 
 ---
 
-## Technical Differentiators
-
-- **Object-Oriented & In-Memory**: Zero disk I/O bottlenecks. Manipulate and pass Pandas DataFrames directly into the engine.
-- **Convex Intercept**: Intelligent baseline shift absorption that preserves the interpretability of synthetic weights ($\sum w = 1$).
-- **Moving Block Bootstrap (MBB)**: Retains temporal autocorrelation during significance testing to prevent artificially tight confidence intervals.
-- **Executive Aesthetics**: Built-in `matplotlib` dark themes tailored for C-Level data storytelling and unquestionable visual significance.
+> **Hands-on example:** [`examples/GeoExperiment/GeoExperiment-Quickstart.ipynb`](examples/GeoExperiment/GeoExperiment-Quickstart.ipynb) — full pipeline with synthetic data, no setup required.
 
 ---
 
-## Systems & Dependencies
+## Key Algorithms
 
-- **Mathematics**: `cvxpy`, `scipy`, `numpy`
-- **Data Engineering**: `pandas`, `scikit-learn`
+| Algorithm | Role |
+|---|---|
+| **Convex Intercept** | Absorbs baseline shift between treated and synthetic while preserving Σw = 1 |
+| **Synthetic Error Ratio (SER)** | Pre-experiment geo ranking and volatility scoring |
+| **ElasticNet Pool Purification** | Removes weak/spurious controls before convex optimization |
+| **Moving Block Bootstrap (MBB)** | Respects temporal autocorrelation (~7-day blocks) for conservative CIs |
+| **OOS Ghost Lift Detection** | Weekly-aligned backtest that flags spurious effects in the experiment design |
+| **Placebo / MSPE Ratio** | Permutation-based empirical p-values robust to noisy markets |
+
+---
+
+## Dependencies
+
+- **Optimization**: `cvxpy`, `scipy`, `numpy`
+- **Data**: `pandas`, `scikit-learn`
 - **Visualization**: `matplotlib`
 
 ---

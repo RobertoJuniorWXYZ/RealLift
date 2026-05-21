@@ -1,17 +1,6 @@
-# RealLift - Causal Inference Library for Lift Measurement
+from .base import RealLift
+from .geo import GeoExperiment, DoEResult, ExperimentResult
 
-from .core import RealLift, DoEResult, ExperimentResult
+RealLift.GeoExperiment = GeoExperiment
 
-from .geo import (
-    discover_geo_clusters,
-    estimate_duration,
-    validate_geo_clusters,
-    run_synthetic_control,
-    bootstrap_significance,
-    run_placebo_tests
-)
-from .pipelines.geo_pipeline import run_geo_experiment, design_of_experiments
-from .simulation import generate_geo_data, generate_simulated_intervention
-from .utils import clean_geo_data
-
-__version__ = "0.6.0"
+__version__ = "0.7.0"
