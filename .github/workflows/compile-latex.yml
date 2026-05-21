@@ -6,6 +6,9 @@ on:
     paths:
       - 'reallift_preprint.tex'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
