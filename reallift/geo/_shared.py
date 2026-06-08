@@ -1,9 +1,14 @@
 import pandas as pd
 import numpy as np
 import cvxpy as cp
+from scipy.stats import wasserstein_distance
 from ._validation import validate_geo_clusters
 
-def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, end_date, n_folds, experiment_days=None, experiment_type="synthetic_control", df=None):
+def _run_oof_refinement_single(
+    cluster, filepath, date_col, df_pre, start_date, end_date, n_folds,
+    experiment_days=None, experiment_type="synthetic_control", df=None,
+    r2_threshold=0.6, gap_threshold=0.15, wape_threshold=0.20, wdist_threshold=None,
+):
     """
     Iterative pruning and Out-of-Fold (OOF) refinement of a single cluster.
     
@@ -55,7 +60,25 @@ def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, 
                 df=df
             )
             cv_row = validation["summary"].iloc[0]
-            
+
+        # Wasserstein distance on full pre-period (distribution-level fit quality)
+        wdist_pct = 0.0
+        t_cols_w = current_cluster["treatment"]
+        c_cols_w = current_cluster["control"]
+        w_arr_w = current_cluster.get("control_weights", [])
+        if c_cols_w and w_arr_w and df_pre is not None:
+            try:
+                y_w = df_pre[t_cols_w].mean(axis=1).values.astype(float)
+                X_w = df_pre[c_cols_w].values.astype(float)
+                X_mean_w = np.where(X_w.mean(axis=0) == 0, 1e-10, X_w.mean(axis=0))
+                y_mean_w = y_w.mean() or 1e-10
+                synth_w = (X_w / X_mean_w) @ np.array(w_arr_w) * y_mean_w
+                wdist_pct = wasserstein_distance(y_w, synth_w) / y_mean_w * 100
+            except Exception:
+                wdist_pct = 0.0
+        cv_row = cv_row.copy()
+        cv_row["wdist_pct"] = wdist_pct
+
         history.append((current_cluster.copy(), cv_row))
 
         controls = current_cluster["control"].copy()
@@ -114,12 +137,18 @@ def _run_oof_refinement_single(cluster, filepath, date_col, df_pre, start_date, 
         current_cluster["control_weights"] = new_weights
         current_cluster["correlation"] = corr
 
-    valid_steps = [
-        step for step in history 
-        if step[1]["r2_test"] >= 0.6 
-        and step[1]["r2_train"] >= 0.6 
-        and abs(step[1]["r2_train"] - step[1]["r2_test"]) <= 0.20
-    ]
+    def _passes(cv):
+        if cv["r2_test"] < r2_threshold or cv["r2_train"] < r2_threshold:
+            return False
+        if abs(cv["r2_train"] - cv["r2_test"]) > gap_threshold:
+            return False
+        if wape_threshold is not None and cv.get("wape_test", 0.0) > wape_threshold:
+            return False
+        if wdist_threshold is not None and cv.get("wdist_pct", 0.0) > wdist_threshold * 100:
+            return False
+        return True
+
+    valid_steps = [step for step in history if _passes(step[1])]
 
     if valid_steps:
         valid_steps.sort(key=lambda x: x[1]["r2_test"], reverse=True)

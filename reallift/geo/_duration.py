@@ -4,6 +4,98 @@ from scipy.stats import norm
 from sklearn.linear_model import LinearRegression
 from ..config.defaults import DEFAULT_POWER, DEFAULT_ALPHA_TEST, DEFAULT_EXPERIMENT_DAYS, DEFAULT_MDE
 
+
+def _simulate_mde(residuals_logdiff, mean_treat, d, alpha, power_target,
+                  fixed_mde=None, n_sim=300, n_boot=500, n_delta=50):
+    """
+    MDE estimation via lift simulation + MBB.
+    Fully consistent with the inference method: injects a hypothetical lift
+    into MBB-resampled noise and checks empirical rejection rate.
+
+    Uses a vectorized trick: precomputes the bootstrap CI lower bounds for
+    the null (delta=0), then shifts by delta_abs — O(n_sim) per delta value.
+
+    Args:
+        residuals_logdiff: calibration regression residuals in log-diff space.
+        mean_treat: pre-period mean of treatment geo in level space.
+        d: experiment duration in days.
+        alpha: significance level (e.g. 0.05).
+        power_target: target power (e.g. 0.80).
+        fixed_mde: if provided, return power at this specific lift (fraction).
+        n_sim: number of outer noise simulations.
+        n_boot: number of inner bootstrap iterations per simulation.
+        n_delta: number of delta values in the search grid.
+
+    Returns:
+        (mde_pct, mde_power) when fixed_mde is None.
+        float power when fixed_mde is provided.
+    """
+    resid_level = np.array(residuals_logdiff) * mean_treat
+    n_resid = len(resid_level)
+
+    if n_resid >= d:
+        resid_d = resid_level[-d:]
+    else:
+        rng0 = np.random.default_rng(0)
+        resid_d = resid_level[rng0.choice(n_resid, size=d, replace=True)]
+
+    n = len(resid_d)
+    block_size = 7 if n >= 14 else (3 if n >= 6 else 1)
+    ci_lower_p = (alpha / 2.0) * 100
+    rng = np.random.default_rng(42)
+
+    def _mbb_rows(n_rows):
+        """Generate n_rows MBB resamples of resid_d. Returns (n_rows, n)."""
+        mat = np.zeros((n_rows, n))
+        if block_size > 1:
+            pool = np.arange(n - block_size + 1)
+            nb = int(np.ceil(n / block_size))
+            for i in range(n_rows):
+                starts = rng.choice(pool, size=nb, replace=True)
+                idx = np.concatenate([np.arange(s, s + block_size) for s in starts])[:n]
+                mat[i] = resid_d[idx]
+        else:
+            for i in range(n_rows):
+                mat[i] = resid_d[rng.choice(n, size=n, replace=True)]
+        return mat
+
+    # Outer: n_sim noise realizations (level-space MBB resamples of residuals)
+    noise_matrix = _mbb_rows(n_sim)   # (n_sim, n)
+
+    # Inner: n_boot bootstrap index matrix
+    if block_size > 1:
+        pool = np.arange(n - block_size + 1)
+        nb = int(np.ceil(n / block_size))
+        boot_idx = np.zeros((n_boot, n), dtype=int)
+        for b in range(n_boot):
+            starts = rng.choice(pool, size=nb, replace=True)
+            idx = np.concatenate([np.arange(s, s + block_size) for s in starts])[:n]
+            boot_idx[b] = idx
+    else:
+        boot_idx = rng.integers(0, n, size=(n_boot, n))
+
+    # Precompute bootstrap CI lower bounds under null (delta=0).
+    # noise_matrix[:, boot_idx] → (n_sim, n_boot, n); mean over axis=2 → (n_sim, n_boot)
+    boot_means_null = noise_matrix[:, boot_idx].mean(axis=2)           # (n_sim, n_boot)
+    ci_lowers_null  = np.percentile(boot_means_null, ci_lower_p, axis=1)  # (n_sim,)
+
+    # KEY: adding delta_abs shifts every CI lower by +delta_abs.
+    # Rejection ↔ ci_lower_null + delta_abs > 0 ↔ ci_lower_null > -delta_abs
+    def _power_at(delta_pct):
+        return float(np.mean(ci_lowers_null > -(delta_pct * mean_treat)))
+
+    if fixed_mde is not None:
+        return _power_at(fixed_mde)
+
+    delta_grid = np.linspace(0.001, 0.30, n_delta)
+    powers     = np.array([_power_at(d_pct) for d_pct in delta_grid])
+
+    reached  = np.where(powers >= power_target)[0]
+    mde_pct  = float(delta_grid[reached[0]])  if len(reached) > 0 else float(delta_grid[-1])
+    mde_power = float(powers[reached[0]])      if len(reached) > 0 else float(powers[-1])
+
+    return mde_pct, mde_power
+
 def estimate_duration(
     filepath=None,
     date_col=None,
@@ -21,6 +113,7 @@ def estimate_duration(
     consolidated=False,
     cluster_residuals=None,
     verbose=True,
+    use_bootstrap_mde=True,
     df=None
 ) -> dict:
     """
@@ -85,6 +178,7 @@ def estimate_duration(
                 end_date=end_date,
                 cluster_idx=i,
                 verbose=verbose,
+                use_bootstrap_mde=use_bootstrap_mde,
                 df=df
             )
             cluster_results.append(res)
@@ -205,6 +299,7 @@ def estimate_duration(
             cluster_idx=cluster_idx,
             consolidated=True,
             verbose=verbose,
+            use_bootstrap_mde=False,
             extra_stats={
                 "method": method,
                 "n_series": n_series,
@@ -263,6 +358,7 @@ def estimate_duration(
         cluster_idx=cluster_idx,
         consolidated=False,
         verbose=verbose,
+        use_bootstrap_mde=use_bootstrap_mde,
         extra_stats={
             "std_naive": std_naive,
             "std_residual_simple": std_residual_simple,
@@ -280,7 +376,8 @@ def _compute_and_report(
     mean_treat, start_date_str, end_date_str,
     treatment_geo, control_geos,
     cluster_idx, consolidated, verbose,
-    extra_stats, residuals=None
+    extra_stats, residuals=None,
+    use_bootstrap_mde=True
 ):
     """
     Internal: compute MDE curve or power curve and produce output.
@@ -290,11 +387,13 @@ def _compute_and_report(
     if mde is None:
         mde_curve = []
         for d in days_list:
-            delta = (z_alpha + z_beta) * sigma / np.sqrt(max(d, 1))
-            mde_curve.append({
-                "days": d,
-                "mde": np.exp(delta) - 1,
-            })
+            if use_bootstrap_mde and residuals is not None:
+                mde_pct, _ = _simulate_mde(residuals, mean_treat, d, alpha, power_target)
+                mde_curve.append({"days": d, "mde": mde_pct})
+            else:
+                se = sigma / np.sqrt(max(d, 1))
+                delta = (z_alpha + z_beta) * se
+                mde_curve.append({"days": d, "mde": np.exp(delta) - 1})
 
         mde_df = pd.DataFrame(mde_curve)
 
@@ -324,18 +423,19 @@ def _compute_and_report(
     delta_pct = np.exp(delta) - 1
     delta_abs = mean_treat * delta_pct
 
-    def compute_power(effect, std, n, a):
-        se = std / np.sqrt(max(n, 1))
+    def compute_power(effect, se, a):
         z = effect / se
         z_a = norm.ppf(1 - a / 2)
         return norm.cdf(z - z_a)
 
     results = []
     for d in days_list:
-        results.append({
-            "days": d,
-            "power": compute_power(delta, sigma, d, alpha),
-        })
+        if use_bootstrap_mde and residuals is not None:
+            power = _simulate_mde(residuals, mean_treat, d, alpha, power_target, fixed_mde=mde)
+        else:
+            se = sigma / np.sqrt(max(d, 1))
+            power = compute_power(delta, se, alpha)
+        results.append({"days": d, "power": power})
 
     results_df = pd.DataFrame(results)
     valid = results_df[results_df["power"] >= power_target]
@@ -348,8 +448,7 @@ def _compute_and_report(
     else:
         best_days = None
         best_power = None
-        n_est = ((z_alpha + z_beta) * sigma / delta) ** 2
-        estimated_days = int(np.ceil(n_est))
+        estimated_days = int(np.ceil(((z_alpha + z_beta) * sigma / delta) ** 2))
 
     if verbose:
         _print_header(consolidated, cluster_idx, auto_mde=False)

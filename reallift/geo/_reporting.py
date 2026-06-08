@@ -941,12 +941,35 @@ def print_experiment_summary(results, date_col, experiment_type="synthetic_contr
     print(f"\n  Result: {final_sig}\n")
     print("=" * 70 + "\n")
 
-def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=None, experiment_days=None, experiment_type=None):
+def _fmt_kpi(val):
+    """Human-readable KPI mean: 1.2M, 456K, 12.3K, 987."""
+    if val is None:
+        return "N/A"
+    if val >= 1_000_000:
+        return f"{val/1_000_000:.1f}M"
+    if val >= 1_000:
+        return f"{val/1_000:.1f}K"
+    return f"{val:.0f}"
+
+
+def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=None, experiment_days=None, experiment_type=None, df=None):
     """Print compact per-cluster table for a scenario with CV metrics and donor pools."""
     cluster_results = duration["cluster_results"]
     consolidated = duration["consolidated"]
 
     is_auto = mde is None
+
+    # Pre-compute geo means from df if available
+    geo_means = {}
+    if df is not None:
+        for cl in clusters:
+            for geo in cl["treatment"]:
+                if geo in df.columns:
+                    geo_means[geo] = df[geo].mean()
+
+    def _cluster_kpi(cl):
+        vals = [geo_means[g] for g in cl["treatment"] if g in geo_means]
+        return _fmt_kpi(sum(vals) / len(vals)) if vals else ""
 
     # ── Duration & MDE Grid ──
     if is_auto:
@@ -957,17 +980,19 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
         # Dynamic column width based on longest treatment name
         treat_w = max((len(", ".join(cl["treatment"])) for cl in clusters), default=10)
         treat_w = max(treat_w, len("Treatment"))
+        kpi_w = 9  # "Avg KPI " column width
 
-        print(f"\n  {'Cluster':<7} | {'Treatment':<{treat_w}} | {'Controls':<8} | {mde_hdr}")
-        print("  " + "-" * (20 + treat_w + len(mde_hdr)))
+        has_kpi = bool(geo_means)
+        kpi_col = f" | {'Avg KPI':<{kpi_w}}" if has_kpi else ""
+        print(f"\n  {'Cluster':<7} | {'Treatment':<{treat_w}}{kpi_col} | {'Controls':<8} | {mde_hdr}")
+        print("  " + "-" * (20 + treat_w + len(mde_hdr) + (kpi_w + 3 if has_kpi else 0)))
 
         for i, (cl, cr) in enumerate(zip(clusters, cluster_results)):
             treat = ", ".join(cl["treatment"])
             weights = cl.get("control_weights", [])
             n_ctrl = sum(1 for w in weights if w > 0.001) if weights else len(cl["control"])
-            
-            curve = cr.get("mde_curve")
 
+            curve = cr.get("mde_curve")
             mde_strs = []
             for d in days_to_print:
                 if curve is not None:
@@ -977,7 +1002,9 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
                     mde_strs.append("N/A")
 
             mde_row = " | ".join(f"{s:<9}" for s in mde_strs)
-            print(f"  {i:<7} | {treat:<{treat_w}} | {n_ctrl:<8} | {mde_row}")
+            cluster_label = f"C{cl['scale_cluster_id']}" if cl.get("scale_cluster_id") is not None else str(i)
+            kpi_cell = f" | {_cluster_kpi(cl):<{kpi_w}}" if has_kpi else ""
+            print(f"  {cluster_label:<7} | {treat:<{treat_w}}{kpi_cell} | {n_ctrl:<8} | {mde_row}")
 
         # Consolidated row
         c_curve = consolidated.get("mde_curve")
@@ -990,8 +1017,9 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
                 c_mdes.append("N/A")
 
         c_mdes_str = " | ".join(f"{s:<9}" for s in c_mdes)
-        print("  " + "-" * (20 + treat_w + len(mde_hdr)))
-        print(f"  {'CONSOL.':<7} | {'pooled':<{treat_w}} | {'':<8} | {c_mdes_str}")
+        kpi_blank = f" | {'':<{kpi_w}}" if has_kpi else ""
+        print("  " + "-" * (20 + treat_w + len(mde_hdr) + (kpi_w + 3 if has_kpi else 0)))
+        print(f"  {'CONSOL.':<7} | {'pooled':<{treat_w}}{kpi_blank} | {'':<8} | {c_mdes_str}")
     else:
         # Dynamic column width based on longest treatment name
         treat_w = max((len(", ".join(cl["treatment"])) for cl in clusters), default=10)
@@ -1011,7 +1039,8 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
             days_str = f"{int(best_days)}d" if best_days else "N/A"
             power_str = f"{best_power:.1%}" if best_power else "N/A"
 
-            print(f"  {i:<7} | {treat:<{treat_w}} | {n_ctrl:<8} | {days_str:<8} | {power_str:<7}")
+            cluster_label = f"C{cl['scale_cluster_id']}" if cl.get("scale_cluster_id") is not None else str(i)
+            print(f"  {cluster_label:<7} | {treat:<{treat_w}} | {n_ctrl:<8} | {days_str:<8} | {power_str:<7}")
 
         c_summary = consolidated["summary"]
         c_best = c_summary.get("best_days")
@@ -1048,7 +1077,8 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
         donors.sort(key=lambda x: x[1], reverse=True)
         n_donors = len(donors)
         
-        print(f"\n  Cluster {i} — {treat_name} ({n_donors} donor{'s' if n_donors != 1 else ''})")
+        cl_label = f"C{cl['scale_cluster_id']}" if cl.get("scale_cluster_id") is not None else str(i)
+        print(f"\n  Cluster {cl_label} — {treat_name} ({n_donors} donor{'s' if n_donors != 1 else ''})")
         print(f"  {'─' * 50}")
         
         # Print donors in two columns for compactness
@@ -1081,7 +1111,8 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
             for i, row in cv_summary.iterrows():
                 treat = ", ".join(row["treatment"]) if isinstance(row["treatment"], list) else str(row["treatment"])
                 r2 = f"{row['r2_test']:.4f}"
-                print(f"  {i:<7} | {treat:<{treat_w}} | {r2:<17}")
+                cl_label = f"C{clusters[i]['scale_cluster_id']}" if clusters and clusters[i].get("scale_cluster_id") is not None else str(i)
+                print(f"  {cl_label:<7} | {treat:<{treat_w}} | {r2:<17}")
         else:
             print(f"\n  CROSS-VALIDATION SUMMARY")
             print(f"  {'Cluster':<7} | {'Treatment':<{treat_w}} | {'R² Train':<8} | {'R² Test':<8} | {'MAPE Tr':<8} | {'MAPE Te':<8} | {'WAPE Tr':<8} | {'WAPE Te':<8}")
@@ -1106,7 +1137,8 @@ def _print_scenario_table(clusters, duration, mde, cv_summary=None, total_geos=N
                 elif abs(gap) > 0.2:
                     warnings_list.append(f"  {treat:<{treat_w}} R² gap = {gap:.4f} (instability risk)")
 
-                print(f"  {i:<7} | {treat:<{treat_w}} | {r2_tr:<8} | {r2_te:<8} | {mape_tr:<8} | {mape_te:<8} | {wape_tr:<8} | {wape_te:<8}")
+                cl_label = f"C{clusters[i]['scale_cluster_id']}" if clusters and clusters[i].get("scale_cluster_id") is not None else str(i)
+                print(f"  {cl_label:<7} | {treat:<{treat_w}} | {r2_tr:<8} | {r2_te:<8} | {mape_tr:<8} | {mape_te:<8} | {wape_tr:<8} | {wape_te:<8}")
 
     
     # ── Dedicated WARNINGS Section ──

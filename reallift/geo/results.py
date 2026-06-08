@@ -14,7 +14,7 @@ class DoEResult(dict):
         self,
         scenario=0,
         durations=None,
-        max_mde=0.05,
+        max_mde=None,
         power_target=0.80,
         alpha=0.05,
         figsize=(12, 7),
@@ -89,8 +89,16 @@ class DoEResult(dict):
             if durations[-1] != d_max:
                 durations.append(d_max)
 
-        # â”€â”€ Compute power curves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # Auto max_mde: compute the MDE at power_target for the shortest duration
         z_alpha = norm.ppf(1 - alpha / 2)
+        z_beta = norm.ppf(power_target)
+        if max_mde is None:
+            d_min_for_mde = min(durations)
+            n_eff_min = max(d_min_for_mde * ac_factor, 1)
+            delta_log = (z_alpha + z_beta) * sigma / np.sqrt(n_eff_min)
+            mde_auto = np.exp(delta_log) - 1
+            max_mde = max(0.05, round(mde_auto * 1.5, 2))
+
         mde_range = np.linspace(0, max_mde, 200)
 
         palette = [
@@ -189,9 +197,11 @@ class DoEResult(dict):
 
             # â”€â”€ Title + scenario subtitle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             pct = s.get("pct_treatment", 0)
-            n_treat = s.get("n_treatment", "?")
-            treat_pool = s.get("treatment_pool", [])
-            treat_str = ", ".join(treat_pool) if treat_pool else f"{n_treat} geos"
+            treat_str = ", ".join(
+                cl["treatment"][0]
+                for cl in s.get("clusters", [])
+                if cl.get("treatment")
+            ) or f"{s.get('n_treatment', '?')} geos"
 
             fig.text(
                 0.5, 0.99,
@@ -207,7 +217,7 @@ class DoEResult(dict):
             )
             fig.text(
                 0.5, 0.915,
-                f"Scenario {scenario}  â€¢  {pct:.0%} treatment  â€¢  {treat_str}",
+                f"Scenario {scenario}  •  {pct:.0%} treatment  •  {treat_str}",
                 ha="center", va="top",
                 fontsize=10, color="#94A3B8",
             )
@@ -360,7 +370,7 @@ class DoEResult(dict):
             
             pct = scenarios[scenario].get("pct_treatment", 0)
             fig.text(0.5, 0.95, "Donor Pool Composition", ha="center", va="top", fontsize=16, fontweight="bold", color="white")
-            fig.text(0.5, 0.91, f"Scenario {scenario}  â€¢  Top {top_n} Donors", ha="center", va="top", fontsize=12, color="#94A3B8")
+            fig.text(0.5, 0.91, f"Scenario {scenario}  •  Top {top_n} Donors", ha="center", va="top", fontsize=12, color="#94A3B8")
 
             ax.grid(True, axis="x", linestyle="--", alpha=0.15, color="white")
             ax.tick_params(colors="#CBD5E1", labelsize=10)
@@ -425,7 +435,7 @@ class DoEResult(dict):
             plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
 
             fig.text(0.5, 0.95, "Design Stability (Cross-Validation)", ha="center", va="top", fontsize=16, fontweight="bold", color="white")
-            fig.text(0.5, 0.91, f"Scenario {scenario}  â€¢  Each point is a cluster", ha="center", va="top", fontsize=12, color="#94A3B8")
+            fig.text(0.5, 0.91, f"Scenario {scenario}  •  Each point is a cluster", ha="center", va="top", fontsize=12, color="#94A3B8")
 
             ax.grid(True, linestyle="--", alpha=0.15, color="white")
             ax.tick_params(colors="#CBD5E1", labelsize=10)
@@ -667,7 +677,7 @@ class DoEResult(dict):
 
             fig.text(0.5, 0.98, "Consolidated Fit (Total Treatment vs Synthetic)", ha="center", va="top", fontsize=16, fontweight="bold", color="white")
             pct = scenarios[scenario].get("pct_treatment", 0)
-            fig.text(0.5, 0.92, f"Scenario {scenario}  â€¢  Aggregated across {len(clusters)} clusters ({pct:.0%} tx)", ha="center", va="top", fontsize=12, color="#94A3B8")
+            fig.text(0.5, 0.92, f"Scenario {scenario}  •  Aggregated across {len(clusters)} clusters ({pct:.0%} tx)", ha="center", va="top", fontsize=12, color="#94A3B8")
 
             ax.grid(True, linestyle="--", alpha=0.15, color="white")
             ax.tick_params(colors="#CBD5E1", labelsize=10)
@@ -680,6 +690,288 @@ class DoEResult(dict):
             ax.legend(loc="best", fontsize=11, framealpha=0.4, facecolor="#111111", edgecolor="#333333", labelcolor="white")
 
             plt.tight_layout(rect=[0, 0, 1, 0.90])
+            plt.show()
+
+    def plot_cluster_distributions(self, scenario=0, figsize=(14, 4)):
+        """
+        Plot the empirical distribution (KDE + histogram) of daily KPI values
+        for Treatment vs Synthetic over the pre-period, one panel per cluster.
+
+        Useful for checking that the synthetic control matches the treatment
+        distribution — not just its trajectory — before running the experiment.
+
+        Parameters
+        ----------
+        scenario : int
+            Scenario index (default 0).
+        figsize : tuple
+            Size per cluster row (width, height).
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+        import scipy.stats as stats
+
+        PALETTE = ["#06B6D4", "#F59E0B", "#10B981", "#EF4444",
+                   "#8B5CF6", "#3B82F6", "#F97316", "#EC4899"]
+
+        if not hasattr(self, "_df") or self._df is None:
+            print("  [plot_cluster_distributions] No underlying dataframe attached.")
+            return
+
+        scenarios = self.get("scenarios", [])
+        if not scenarios or scenario >= len(scenarios):
+            print("  [plot_cluster_distributions] Invalid scenario.")
+            return
+
+        clusters = scenarios[scenario].get("clusters", [])
+        if not clusters:
+            print("  [plot_cluster_distributions] No clusters found.")
+            return
+
+        df = self._df.copy()
+        date_col = getattr(self, "_date_col", None)
+        if date_col is None or date_col not in df.columns:
+            date_col = df.select_dtypes(include=["datetime64"]).columns[0]
+        df = df.sort_values(date_col).set_index(date_col)
+
+        def human_fmt(x, pos):
+            if abs(x) >= 1e6: return f"{x/1e6:.1f}M"
+            if abs(x) >= 1e3: return f"{x/1e3:.0f}k"
+            return f"{x:,.0f}"
+
+        n_clusters = len(clusters)
+        cols = 2
+        rows = (n_clusters + 1) // cols or 1
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                rows, cols,
+                figsize=(figsize[0], figsize[1] * rows),
+                squeeze=False,
+            )
+            fig.patch.set_facecolor("black")
+            axes_flat = axes.flatten()
+
+            for i, cl in enumerate(clusters):
+                ax = axes_flat[i]
+                ax.set_facecolor("black")
+                ax.grid(True, linestyle="--", alpha=0.15, color="white")
+                for spine in ax.spines.values():
+                    spine.set_color("#1E1E1E")
+
+                treat_geos = cl.get("treatment", [])
+                ctrl_geos  = cl.get("control", [])
+                weights    = cl.get("control_weights", [])
+                if not treat_geos or not ctrl_geos or not weights:
+                    continue
+
+                color = PALETTE[i % len(PALETTE)]
+
+                y_treat = (
+                    df[treat_geos].mean(axis=1)
+                    if len(treat_geos) > 1 else df[treat_geos[0]]
+                ).values
+                X_ctrl = df[ctrl_geos].values
+                w_arr  = np.array(weights)
+                y_mean = y_treat.mean() or 1e-10
+                X_mean = np.where(X_ctrl.mean(axis=0) == 0, 1e-10, X_ctrl.mean(axis=0))
+                y_synth = (X_ctrl / X_mean @ w_arr) * y_mean
+
+                # Histogram (background)
+                ax.hist(y_treat, bins=35, density=True,
+                        color=color, alpha=0.20, label="_nolegend_")
+                ax.hist(y_synth, bins=35, density=True,
+                        color="#10B981", alpha=0.15, label="_nolegend_")
+
+                # KDE curves
+                try:
+                    kde_t  = stats.gaussian_kde(y_treat)
+                    kde_s  = stats.gaussian_kde(y_synth)
+                    xmin   = min(y_treat.min(), y_synth.min())
+                    xmax   = max(y_treat.max(), y_synth.max())
+                    xr     = np.linspace(xmin, xmax, 300)
+                    ax.plot(xr, kde_t(xr), color=color,    linewidth=2.5, label="Treatment")
+                    ax.plot(xr, kde_s(xr), color="#10B981", linewidth=2.5,
+                            linestyle="--", label="Synthetic")
+                except Exception:
+                    pass
+
+                # Mean lines
+                ax.axvline(y_treat.mean(), color=color,    linestyle=":",
+                           linewidth=1.5, alpha=0.8)
+                ax.axvline(y_synth.mean(), color="#10B981", linestyle=":",
+                           linewidth=1.5, alpha=0.8)
+
+                treat_str = ", ".join(treat_geos)
+                ax.set_title(
+                    f"C{i} — {treat_str}",
+                    color="white", fontweight="bold", fontsize=11,
+                )
+                ax.xaxis.set_major_formatter(ticker.FuncFormatter(human_fmt))
+                ax.tick_params(colors="#CBD5E1", labelsize=9)
+
+                try:
+                    from scipy.stats import wasserstein_distance
+                    wdist = wasserstein_distance(y_treat, y_synth)
+                    wdist_pct = wdist / (y_treat.mean() or 1e-10) * 100
+                    wdist_str = f"{wdist_pct:.1f}%"
+                except Exception:
+                    wdist_str = "N/A"
+
+                bbox = dict(boxstyle="round,pad=0.4", facecolor="#111111",
+                            edgecolor="#333333", alpha=0.8)
+                info = (
+                    f"μ={y_treat.mean():,.0f}\n"
+                    f"Treatment  σ={y_treat.std():,.0f}\n"
+                    f"Synthetic  σ={y_synth.std():,.0f}\n"
+                    f"Wasserstein={wdist_str}"
+                )
+                ax.text(0.97, 0.95, info, transform=ax.transAxes, fontsize=9,
+                        va="top", ha="right", color="white",
+                        bbox=bbox, family="monospace")
+
+                if i == 0:
+                    ax.legend(loc="upper left", framealpha=0.4,
+                              facecolor="#111111", edgecolor="#333333",
+                              labelcolor="white", fontsize=9)
+
+            for j in range(i + 1, len(axes_flat)):
+                fig.delaxes(axes_flat[j])
+
+            fig.text(0.5, 0.98, "Pre-Period KPI Distribution (Treatment vs Synthetic)",
+                     ha="center", va="top", fontsize=15, fontweight="bold", color="white")
+            fig.text(0.5, 0.95, f"Scenario {scenario}  •  Daily values over pre-period",
+                     ha="center", va="top", fontsize=11, color="#94A3B8")
+            plt.tight_layout(rect=[0, 0, 1, 0.93])
+            plt.show()
+
+    def plot_consolidated_distribution(self, scenario=0, figsize=(12, 5)):
+        """
+        Plot the empirical distribution (KDE + histogram) of daily KPI values
+        for the consolidated (summed) Treatment vs Synthetic over the pre-period.
+
+        Parameters
+        ----------
+        scenario : int
+            Scenario index (default 0).
+        figsize : tuple
+            Figure size.
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+        import scipy.stats as stats
+
+        if not hasattr(self, "_df") or self._df is None:
+            print("  [plot_consolidated_distribution] No underlying dataframe attached.")
+            return
+
+        scenarios = self.get("scenarios", [])
+        if not scenarios or scenario >= len(scenarios):
+            print("  [plot_consolidated_distribution] Invalid scenario.")
+            return
+
+        clusters = scenarios[scenario].get("clusters", [])
+        if not clusters:
+            print("  [plot_consolidated_distribution] No clusters found.")
+            return
+
+        df = self._df.copy()
+        date_col = getattr(self, "_date_col", None)
+        if date_col is None or date_col not in df.columns:
+            date_col = df.select_dtypes(include=["datetime64"]).columns[0]
+        df = df.sort_values(date_col).set_index(date_col)
+
+        agg_treat = np.zeros(len(df))
+        agg_synth = np.zeros(len(df))
+
+        for cl in clusters:
+            treat_geos = cl.get("treatment", [])
+            ctrl_geos  = cl.get("control", [])
+            weights    = cl.get("control_weights", [])
+            if not treat_geos or not ctrl_geos or not weights:
+                continue
+            y_t = (
+                df[treat_geos].mean(axis=1)
+                if len(treat_geos) > 1 else df[treat_geos[0]]
+            ).values
+            X_ctrl = df[ctrl_geos].values
+            w_arr  = np.array(weights)
+            y_mean = y_t.mean() or 1e-10
+            X_mean = np.where(X_ctrl.mean(axis=0) == 0, 1e-10, X_ctrl.mean(axis=0))
+            agg_treat += y_t
+            agg_synth += (X_ctrl / X_mean @ w_arr) * y_mean
+
+        def human_fmt(x, pos):
+            if abs(x) >= 1e6: return f"{x/1e6:.1f}M"
+            if abs(x) >= 1e3: return f"{x/1e3:.0f}k"
+            return f"{x:,.0f}"
+
+        with plt.style.context("dark_background"):
+            fig, ax = plt.subplots(figsize=figsize)
+            fig.patch.set_facecolor("black")
+            ax.set_facecolor("black")
+            ax.grid(True, linestyle="--", alpha=0.15, color="white")
+            for spine in ax.spines.values():
+                spine.set_color("#1E1E1E")
+
+            ax.hist(agg_treat, bins=40, density=True,
+                    color="#06B6D4", alpha=0.20, label="_nolegend_")
+            ax.hist(agg_synth, bins=40, density=True,
+                    color="#10B981", alpha=0.15, label="_nolegend_")
+
+            try:
+                xmin = min(agg_treat.min(), agg_synth.min())
+                xmax = max(agg_treat.max(), agg_synth.max())
+                xr   = np.linspace(xmin, xmax, 300)
+                kde_t = stats.gaussian_kde(agg_treat)
+                kde_s = stats.gaussian_kde(agg_synth)
+                ax.plot(xr, kde_t(xr), color="#06B6D4", linewidth=2.5,
+                        label="Total Treatment")
+                ax.plot(xr, kde_s(xr), color="#10B981", linewidth=2.5,
+                        linestyle="--", label="Total Synthetic")
+            except Exception:
+                pass
+
+            ax.axvline(agg_treat.mean(), color="#06B6D4", linestyle=":",
+                       linewidth=1.5, alpha=0.8)
+            ax.axvline(agg_synth.mean(), color="#10B981", linestyle=":",
+                       linewidth=1.5, alpha=0.8)
+
+            ax.xaxis.set_major_formatter(ticker.FuncFormatter(human_fmt))
+            ax.tick_params(colors="#CBD5E1", labelsize=10)
+
+            pct = scenarios[scenario].get("pct_treatment", 0)
+            fig.text(0.5, 0.98,
+                     "Consolidated Pre-Period KPI Distribution (Treatment vs Synthetic)",
+                     ha="center", va="top", fontsize=15, fontweight="bold", color="white")
+            fig.text(0.5, 0.93,
+                     f"Scenario {scenario}  •  Aggregated across {len(clusters)} clusters ({pct:.0%} tx)  •  Daily values",
+                     ha="center", va="top", fontsize=11, color="#94A3B8")
+
+            try:
+                from scipy.stats import wasserstein_distance
+                wdist = wasserstein_distance(agg_treat, agg_synth)
+                wdist_pct = wdist / (agg_treat.mean() or 1e-10) * 100
+                wdist_str = f"{wdist_pct:.1f}%"
+            except Exception:
+                wdist_str = "N/A"
+
+            bbox = dict(boxstyle="round,pad=0.4", facecolor="#111111",
+                        edgecolor="#333333", alpha=0.8)
+            info = (
+                f"μ={agg_treat.mean():,.0f}\n"
+                f"Treatment  σ={agg_treat.std():,.0f}\n"
+                f"Synthetic  σ={agg_synth.std():,.0f}\n"
+                f"Wasserstein={wdist_str}"
+            )
+            ax.text(0.97, 0.95, info, transform=ax.transAxes, fontsize=10,
+                    va="top", ha="right", color="white",
+                    bbox=bbox, family="monospace")
+
+            ax.legend(loc="upper left", fontsize=11, framealpha=0.4,
+                      facecolor="#111111", edgecolor="#333333", labelcolor="white")
+
+            plt.tight_layout(rect=[0, 0, 1, 0.91])
             plt.show()
 
 class ExperimentResult(dict):
@@ -872,7 +1164,7 @@ class ExperimentResult(dict):
             plt.tight_layout(rect=[0, 0, 1, 0.90])
             plt.show()
 
-    def plot_lift_distributions(self, show_null=False, figsize=(15, 6)):
+    def plot_consolidated_lift_distributions(self, show_null=False, figsize=(15, 6)):
         """
         Plot the bootstrap distributions of the Absolute and Percentual Lifts.
         Shows histograms with KDE curves and 95% Confidence Intervals.
@@ -1017,7 +1309,185 @@ class ExperimentResult(dict):
                      verticalalignment='top', color="white", bbox=bbox_props, family='monospace')
 
             fig.suptitle("Consolidated Treatment Effect (Bootstrap Distribution)", color="white", fontsize=16, fontweight="bold")
-            fig.text(0.5, 0.92, "Empirical distributions generated via Moving Block Bootstrap (MBB)", ha="center", va="top", fontsize=12, color="#94A3B8")
+            fig.text(0.5, 0.92, "Empirical distributions generated via Circular Moving Block Bootstrap (CMBB)", ha="center", va="top", fontsize=12, color="#94A3B8")
 
             plt.tight_layout(rect=[0, 0, 1, 0.90])
+            plt.show()
+
+    def plot_cluster_lift_distributions(self, show_null=False, figsize=None):
+        """
+        Plot bootstrap lift distributions for each cluster individually.
+
+        One row per cluster, two columns (absolute on the left, percentual on
+        the right).  Reuses the CMBB bootstrap arrays already computed during
+        inference — no re-sampling needed.
+
+        Parameters
+        ----------
+        show_null : bool
+            If True, overlays the null hypothesis (H0) distribution centred at 0.
+        figsize : tuple, optional
+            Figure size.  Defaults to (14, 5 * n_clusters).
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+        import scipy.stats as stats
+
+        PALETTE = ["#06B6D4", "#F59E0B", "#10B981", "#EF4444",
+                   "#8B5CF6", "#3B82F6", "#F97316", "#EC4899"]
+
+        def human_format(x, pos):
+            if abs(x) >= 1e9: return f"{x/1e9:.1f}B"
+            if abs(x) >= 1e6: return f"{x/1e6:.1f}M"
+            if abs(x) >= 1e3: return f"{x/1e3:.1f}k"
+            return f"{x:,.0f}"
+
+        results = self.get("results", [])
+        if not results:
+            print("  [plot_cluster_lift_distributions] No experiment results found.")
+            return
+
+        n_clusters = len(results)
+        fig_w = figsize[0] if figsize else 14
+        fig_h = figsize[1] if figsize else 5 * n_clusters
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                n_clusters, 2,
+                figsize=(fig_w, fig_h),
+                squeeze=False,
+            )
+            fig.patch.set_facecolor("black")
+
+            for i, res in enumerate(results):
+                boot      = res.get("synthetic", {}).get("bootstrap", {})
+                plot_data = res.get("synthetic", {}).get("plotting_data", {})
+                if not boot or not plot_data:
+                    continue
+
+                treat_geo = plot_data.get("treatment_geo", f"Cluster {i}")
+                if isinstance(treat_geo, list):
+                    treat_geo = ", ".join(treat_geo)
+                color = PALETTE[i % len(PALETTE)]
+
+                boot_abs = np.array(boot["boot_totals_abs"])
+                boot_pct = np.array(boot["boot_totals_pct"]) * 100
+                ci_l_abs = boot["ci_lower_total_abs"]
+                ci_u_abs = boot["ci_upper_total_abs"]
+                ci_l_pct = boot["ci_lower_total_pct"] * 100
+                ci_u_pct = boot["ci_upper_total_pct"] * 100
+
+                post_real  = np.array(plot_data["post_real"])
+                post_synth = np.array(plot_data["post_synth"])
+                tot_synth  = float(np.sum(post_synth)) or 1e-10
+                obs_abs    = float(np.sum(post_real) - np.sum(post_synth))
+                obs_pct    = obs_abs / tot_synth * 100
+
+                bbox_props = dict(
+                    boxstyle="round,pad=0.4", facecolor="#111111",
+                    edgecolor="#333333", alpha=0.8,
+                )
+
+                for j, (data, ci_l, ci_u, obs, is_pct) in enumerate([
+                    (boot_abs, ci_l_abs, ci_u_abs, obs_abs, False),
+                    (boot_pct, ci_l_pct, ci_u_pct, obs_pct, True),
+                ]):
+                    ax = axes[i, j]
+                    ax.set_facecolor("black")
+                    ax.grid(True, linestyle="--", alpha=0.15, color="white")
+                    for spine in ax.spines.values():
+                        spine.set_color("#1E1E1E")
+
+                    std_data = np.std(data)
+                    ax.hist(data, bins=40, density=True,
+                            color=color, alpha=0.25, edgecolor=None)
+
+                    try:
+                        if show_null:
+                            null_data = data - np.mean(data)
+                            null_kde  = stats.gaussian_kde(null_data)
+                            x_null = np.linspace(
+                                min(null_data) - std_data,
+                                max(null_data) + std_data, 200,
+                            )
+                            ax.plot(x_null, null_kde(x_null),
+                                    color="#EF4444", linewidth=2, label="Null (H0)")
+                            ax.fill_between(x_null, 0, null_kde(x_null),
+                                            color="#EF4444", alpha=0.12)
+                            ax.axvline(0, color="#EF4444", linestyle="--",
+                                       linewidth=1.5, alpha=0.8)
+                        else:
+                            ax.axvline(0, color="#EF4444", linestyle="-",
+                                       linewidth=2, label="Null (0)")
+
+                        kde    = stats.gaussian_kde(data)
+                        x_eval = np.linspace(
+                            min(data) - std_data, max(data) + std_data, 200
+                        )
+                        ax.plot(x_eval, kde(x_eval),
+                                color=color, linewidth=2.5, label="Observed Lift (H1)")
+                        x_fill = np.linspace(ci_l, ci_u, 100)
+                        ax.fill_between(x_fill, 0, kde(x_fill),
+                                        color=color, alpha=0.25)
+                    except Exception:
+                        if not show_null:
+                            ax.axvline(0, color="#EF4444", linestyle="-",
+                                       linewidth=2, label="Null (0)")
+
+                    ax.axvline(obs,  color="#FBBF24", linestyle="--",
+                               linewidth=2, label="Point Estimate")
+                    ax.axvline(ci_l, color="#94A3B8", linestyle=":",
+                               linewidth=2, label="95% CI")
+                    ax.axvline(ci_u, color="#94A3B8", linestyle=":",
+                               linewidth=2)
+
+                    kind = "Percentual" if is_pct else "Absolute"
+                    ax.set_title(
+                        f"C{i} — {treat_geo}  |  {kind} Lift",
+                        color="white", fontweight="bold", fontsize=11,
+                    )
+                    ax.tick_params(colors="#CBD5E1", labelsize=9)
+
+                    if is_pct:
+                        ax.xaxis.set_major_formatter(
+                            ticker.PercentFormatter(xmax=100, decimals=1)
+                        )
+                        info = (
+                            f"Lift: {obs_pct:.2f}%\n"
+                            f"95% CI: [{ci_l_pct:.2f}%, {ci_u_pct:.2f}%]\n"
+                            f"Std: {np.std(boot_pct):.2f}%"
+                        )
+                    else:
+                        ax.xaxis.set_major_formatter(
+                            ticker.FuncFormatter(human_format)
+                        )
+                        fmt = lambda v: f"{v:,.0f}"
+                        info = (
+                            f"Lift: {fmt(obs_abs)}\n"
+                            f"95% CI: [{fmt(ci_l_abs)}, {fmt(ci_u_abs)}]\n"
+                            f"Std: {fmt(np.std(boot_abs))}"
+                        )
+
+                    ax.text(
+                        0.03, 0.95, info,
+                        transform=ax.transAxes, fontsize=9,
+                        verticalalignment="top", color="white",
+                        bbox=bbox_props, family="monospace",
+                    )
+                    ax.legend(
+                        loc="upper right", framealpha=0.4,
+                        facecolor="#111111", edgecolor="#333333",
+                        labelcolor="white", fontsize=8,
+                    )
+
+            fig.suptitle(
+                "Cluster-Level Treatment Effect (Bootstrap Distribution)",
+                color="white", fontsize=15, fontweight="bold",
+            )
+            fig.text(
+                0.5, 0.98,
+                "Empirical distributions generated via Circular Moving Block Bootstrap (CMBB)",
+                ha="center", va="top", fontsize=11, color="#94A3B8",
+            )
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
             plt.show()

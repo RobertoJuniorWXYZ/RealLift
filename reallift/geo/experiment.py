@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from ..base import RealLift
@@ -86,15 +87,274 @@ class GeoExperiment(RealLift):
 
         self.df = result
         self.geos = [c for c in result.columns if c != self.date_col]
+        self._df_post_clean = result.copy()   # baseline for remove_outliers()
 
         if save_csv:
             self._filepath = file_name
 
         return result
 
+    def remove_outliers(
+        self,
+        alpha: float = 1.5,
+        plot: bool = True,
+        verbose: bool = None,
+    ) -> pd.DataFrame:
+        """
+        Remove geo-level outliers before pre-clustering.
+
+        Detects outliers using the Tukey fence on ``log(geo_mean)`` and drops
+        them from ``self.df`` and ``self.geos``.  Always resets from the
+        post-clean baseline so calling this twice with different ``alpha``
+        values starts fresh each time.
+
+        Parameters
+        ----------
+        alpha : float, default 1.5
+            IQR multiplier for the fence: ``[Q1 − alpha·IQR, Q3 + alpha·IQR]``.
+            Standard Tukey fence is 1.5; use 3.0 for extreme outliers only.
+        plot : bool, default True
+            Render a strip chart in log space showing kept vs removed geos,
+            Q1/Q3 markers, and fence boundaries.
+        verbose : bool, optional
+            Print outlier list and summary.  Defaults to ``self._verbose``.
+
+        Returns
+        -------
+        pd.DataFrame
+            Updated dataframe with outlier geo columns removed.
+
+        Examples
+        --------
+        >>> rl.clean()
+        >>> rl.remove_outliers(alpha=1.5)
+        >>> k = rl.pre_clustering()
+        >>> doe = rl.design(scale_clusters=k)
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mtick
+
+        if verbose is None:
+            verbose = self._verbose
+
+        base_df = getattr(self, "_df_post_clean", self.df).copy()
+        all_geos = [c for c in base_df.columns if c != self.date_col]
+
+        geo_means = {g: base_df[g].mean() for g in all_geos}
+        log_vals  = {g: np.log(max(geo_means[g], 1e-10)) for g in all_geos}
+        lv_arr    = np.array(list(log_vals.values()))
+
+        q1, q3 = np.percentile(lv_arr, [25, 75])
+        iqr    = q3 - q1
+        lo     = q1 - alpha * iqr
+        hi     = q3 + alpha * iqr
+
+        kept     = [g for g in all_geos if lo <= log_vals[g] <= hi]
+        outliers = [g for g in all_geos if log_vals[g] < lo or log_vals[g] > hi]
+
+        if verbose:
+            print(f"\n{'=' * 60}")
+            print(f"  OUTLIER REMOVAL  (alpha = {alpha})")
+            print(f"{'=' * 60}")
+            print(f"  Fence (log space) : [{lo:.3f}, {hi:.3f}]")
+            print(f"  Q1 / Q3           : {q1:.3f} / {q3:.3f}   IQR = {iqr:.3f}")
+            print(f"  Geos kept         : {len(kept)}/{len(all_geos)}")
+            if outliers:
+                rows = [(g, f"{geo_means[g]:,.0f}", f"{log_vals[g]:.3f}") for g in outliers]
+                max_name = max(len(r[0]) for r in rows)
+                print(f"\n  {'Geo':<{max_name}}  {'Mean':>12}  {'log(mean)':>10}")
+                print(f"  {'-'*max_name}  {'─'*12}  {'─'*10}")
+                for geo, mean_s, lv_s in rows:
+                    side = "▲ upper" if log_vals[geo] > hi else "▼ lower"
+                    print(f"  {geo:<{max_name}}  {mean_s:>12}  {lv_s:>10}  {side}")
+            else:
+                print("  No outliers detected.")
+            print()
+
+        if plot:
+            PALETTE = {"kept": "#3B82F6", "outlier": "#EF4444"}
+            with plt.style.context("dark_background"):
+                fig, ax = plt.subplots(figsize=(12, 3.5))
+                fig.patch.set_facecolor("black")
+                ax.set_facecolor("black")
+
+                rng = np.random.default_rng(0)
+                for g in all_geos:
+                    lv  = log_vals[g]
+                    jit = rng.uniform(-0.18, 0.18)
+                    is_out = g in outliers
+                    color  = PALETTE["outlier"] if is_out else PALETTE["kept"]
+                    ax.scatter(lv, jit, color=color, s=55, zorder=3,
+                               alpha=0.85, linewidths=0)
+                    if is_out:
+                        ax.annotate(g, (lv, jit), textcoords="offset points",
+                                    xytext=(0, 8), ha="center", fontsize=7,
+                                    color="#EF4444", fontweight="bold")
+
+                from matplotlib.transforms import blended_transform_factory
+                btrans = blended_transform_factory(ax.transData, ax.transAxes)
+                for x, label, ls in [
+                    (q1, "Q1", "--"), (q3, "Q3", "--"),
+                    (lo, f"Q1−{alpha}×IQR", ":"), (hi, f"Q3+{alpha}×IQR", ":"),
+                ]:
+                    ax.axvline(x, color="#94A3B8", linewidth=1, linestyle=ls, alpha=0.7)
+                    ax.text(x, 0.01, label, ha="center", va="bottom",
+                            fontsize=8, color="#94A3B8", transform=btrans)
+
+                from matplotlib.patches import Patch
+                legend = [Patch(color=PALETTE["kept"],    label=f"Kept ({len(kept)})"),
+                          Patch(color=PALETTE["outlier"], label=f"Removed ({len(outliers)})")]
+                ax.legend(handles=legend, loc="upper right", framealpha=0.2,
+                          labelcolor="white", fontsize=9)
+
+                ax.set_xlabel("log(geo mean)", color="#CBD5E1", fontsize=10)
+                ax.set_yticks([])
+                ax.set_title(f"Outlier Removal — Tukey Fence  (α = {alpha})",
+                             color="white", fontweight="bold", fontsize=12, pad=14)
+                ax.tick_params(colors="#CBD5E1")
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                plt.tight_layout()
+                plt.show()
+
+        result = base_df.drop(columns=outliers)
+        self.df   = result
+        self.geos = [c for c in result.columns if c != self.date_col]
+        return result
+
     # ──────────────────────────────────────────────────────────────────────
     # Design of Experiments
     # ──────────────────────────────────────────────────────────────────────
+
+    def pre_clustering(
+        self,
+        scale_clusters=None,
+        geos=None,
+        max_k=None,
+        plot=True,
+        verbose=True,
+    ) -> int:
+        """
+        K-Means pre-clustering of geos by scale before :meth:`design`.
+
+        Runs K-Means in log space on geo pre-period means and produces standard
+        K-Means diagnostics: Silhouette + WCSS (elbow) selection plots, cluster
+        summary table, and a strip chart of geo means coloured by cluster.
+
+        When ``scale_clusters=None``, k is chosen automatically via Silhouette
+        score subject to a minimum-k constraint derived from the log range of
+        geo means.  Pass an explicit integer to inspect a fixed k.
+
+        Run :meth:`remove_outliers` before this to exclude extreme geos from
+        the candidate pool.
+
+        Parameters
+        ----------
+        scale_clusters : int or None
+            Explicit k to use.  ``None`` triggers automatic selection.
+        geos : list, optional
+            Subset of geos. Defaults to all geos in ``self.df``.
+        max_k : int or None
+            Upper bound for k search.  Defaults to ``min(8, n_geos // 3)``.
+        plot : bool
+            Render Silhouette/WCSS and strip charts.
+        verbose : bool
+            Print cluster summary tables.
+
+        Returns
+        -------
+        int
+            Suggested (or confirmed) number of scale clusters.
+
+        Examples
+        --------
+        >>> k = rl.pre_clustering()
+        >>> doe = rl.design(scale_clusters=k)
+        """
+        from ._design import compute_scale_clusters as _pre_clustering
+
+        result = _pre_clustering(
+            scale_clusters=scale_clusters,
+            geos=geos or self.geos,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            date_col=self.date_col,
+            max_k=max_k,
+            plot=plot,
+            verbose=verbose,
+            df=self.df,
+        )
+        self._pre_clustering_result = result
+        return result["suggested_k"]
+
+    def cluster_correlations(self) -> "pd.DataFrame":
+        """
+        Mean intra-cluster Pearson correlation for each scale cluster.
+
+        Computes the average of all pairwise off-diagonal correlations between
+        geo time series within each cluster, over the pre-period window.
+        Useful for assessing cluster cohesion before :meth:`design`.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``cluster``, ``n_geos``, ``mean_corr``, ``median_corr``,
+            ``min_corr``, ``max_corr``.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`pre_clustering` has not been called yet.
+
+        Examples
+        --------
+        >>> k = rl.pre_clustering(scale_clusters=5)
+        >>> rl.cluster_correlations()
+        """
+        import numpy as np
+        import pandas as pd
+
+        if not hasattr(self, "_pre_clustering_result"):
+            raise RuntimeError(
+                "Call pre_clustering() before cluster_correlations()."
+            )
+
+        geo_df = self._pre_clustering_result["geo_df"]
+
+        mask = pd.Series([True] * len(self.df), index=self.df.index)
+        if self.start_date is not None:
+            mask &= self.df[self.date_col] >= pd.to_datetime(self.start_date)
+        if self.end_date is not None:
+            mask &= self.df[self.date_col] <= pd.to_datetime(self.end_date)
+        df_period = self.df.loc[mask]
+
+        cluster_ids = sorted(
+            [c for c in geo_df["cluster"].unique() if c != "outlier"]
+        )
+
+        rows = []
+        for cid in cluster_ids:
+            geos_in_cluster = geo_df.loc[geo_df["cluster"] == cid, "geo"].tolist()
+            n = len(geos_in_cluster)
+            if n < 2:
+                rows.append({
+                    "cluster": cid, "n_geos": n,
+                    "mean_corr": np.nan, "median_corr": np.nan,
+                    "min_corr": np.nan, "max_corr": np.nan,
+                })
+                continue
+            corr = df_period[geos_in_cluster].corr().values
+            off_diag = corr[~np.eye(n, dtype=bool)]
+            rows.append({
+                "cluster":     cid,
+                "n_geos":      n,
+                "mean_corr":   round(float(np.mean(off_diag)), 4),
+                "median_corr": round(float(np.median(off_diag)), 4),
+                "min_corr":    round(float(np.min(off_diag)), 4),
+                "max_corr":    round(float(np.max(off_diag)), 4),
+            })
+
+        return pd.DataFrame(rows)
 
     def design(
         self,
@@ -106,15 +366,44 @@ class GeoExperiment(RealLift):
         n_folds=5,
         search_mode="ranking",
         experiment_type="synthetic_control",
-        use_elasticnet=False,
+        method="penalized_scm",
+        elasticnet_alpha=0.01,
+        elasticnet_l1_ratio=0.5,
         check_ghost_lift=True,
+        check_oof=True,
+        r2_threshold=0.6,
+        gap_threshold=0.15,
+        wape_threshold=0.20,
+        wdist_threshold=None,
         n_jobs=None,
         verbose=None,
         save_pdf=False,
         pdf_name="doe_report.pdf",
         logo=None,
+        use_bootstrap_mde=True,
+        scale_clusters=None,
+        restrict_donors=False,
     ) -> DoEResult:
-        """Run Design of Experiments. Returns a :class:`DoEResult`."""
+        """Run Design of Experiments. Returns a :class:`DoEResult`.
+
+        Parameters
+        ----------
+        method : str
+            Donor weighting strategy. One of:
+
+            ``"penalized_scm"`` (default)
+                Single CVXPY step with L1 + L2 penalties and ``w >= 0``
+                (no ``sum(w) = 1`` so L1 actively promotes sparsity).
+                Weights are normalized after solving.
+
+            ``"elastic_net"``
+                Two-step: ElasticNet on log-diff data selects donors
+                (coef > 0), then constrained SCM estimates final weights.
+
+            ``"scm"``
+                Classic SCM — CVXPY with ``w >= 0``, ``sum(w) = 1``,
+                no regularization. All donors in the pool compete.
+        """
         from ._design import design_of_experiments
         from ..config.defaults import DEFAULT_EXPERIMENT_DAYS
 
@@ -136,13 +425,23 @@ class GeoExperiment(RealLift):
             n_folds=n_folds,
             search_mode=search_mode,
             experiment_type=experiment_type,
-            use_elasticnet=use_elasticnet,
+            method=method,
+            elasticnet_alpha=elasticnet_alpha,
+            elasticnet_l1_ratio=elasticnet_l1_ratio,
             check_ghost_lift=check_ghost_lift,
+            check_oof=check_oof,
+            r2_threshold=r2_threshold,
+            gap_threshold=gap_threshold,
+            wape_threshold=wape_threshold,
+            wdist_threshold=wdist_threshold,
             n_jobs=n_jobs,
             verbose=verbose,
             save_pdf=save_pdf,
             pdf_name=pdf_name,
             logo=logo,
+            use_bootstrap_mde=use_bootstrap_mde,
+            scale_clusters=scale_clusters,
+            restrict_donors=restrict_donors,
             df=self.df,
         )
 
